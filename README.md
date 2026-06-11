@@ -135,5 +135,5 @@ Index: [`04-documentation-index.md`](04-documentation-index.md)
 
 ## Status
 
-- Firmware skeleton compiles for ESP32-S3 (stub classes, no features wired yet)
-- Step 2 next: implement `DeviceIdentity`, `ConfigManager`, `WifiManager`, `HealthService`, …
+- **Step 2 done:** identity, config (defaults/saved/active + NVS), Wi-Fi, SNTP, health, bootstrap
+- **Step 3 next:** local REST server (health, version, config routes)
