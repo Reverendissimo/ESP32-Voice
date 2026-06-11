@@ -1,10 +1,47 @@
+# Python virtualenv and caches
 .venv/
+venv/
 __pycache__/
-*.pyc
-.DS_Store
-
-# ESP-IDF build artifacts (future)
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
 build/
-sdkconfig
-sdkconfig.old
-dependencies.lock
+pip-wheel-metadata/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# Downloaded toolchains / SDKs (keep outside repo; ignore if cloned locally)
+esp-idf/
+.esp/
+
+# ESP-IDF generated and downloaded project artifacts
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/sdkconfig.old.*
+firmware/dependencies.lock
+firmware/managed_components/
+firmware/.cache/
+
+# Compiled firmware binaries outside build/
+firmware/*.bin
+firmware/*.elf
+firmware/*.map
+
+# Flash / debug logs
+*.log
+sdkconfig.ci

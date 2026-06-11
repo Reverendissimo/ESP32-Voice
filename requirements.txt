@@ -1,0 +1,8 @@
+# Host-side test and dev tooling (use with .venv)
+pytest>=8.0
+requests>=2.31
+pyserial>=3.5
+esptool>=4.7
+pytest-embedded>=1.10
+pytest-embedded-idf>=1.10
+pytest-embedded-serial>=1.10

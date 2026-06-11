@@ -1,0 +1,19 @@
+    idf_component_register(
+        SRCS
+"http_server_service.cpp"
+"route_registry.cpp"
+"json_response_builder.cpp"
+"error_response_factory.cpp"
+"routes/play_route.cpp"
+"routes/display_route.cpp"
+"routes/config_route.cpp"
+"routes/health_route.cpp"
+"routes/battery_route.cpp"
+"routes/environment_route.cpp"
+"routes/ir_route.cpp"
+"routes/time_route.cpp"
+        INCLUDE_DIRS
+"."
+"routes"
+        REQUIRES esp_http_server json
+    )

@@ -68,18 +68,27 @@ Full contract: [`05-platform-and-api.md`](05-platform-and-api.md)
 
 ## Build prerequisites
 
-- [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) (ESP32-S3 target)
-- ESP-BOX board support / BOX-3 examples as hardware reference
+- [ESP-IDF v5.4](https://docs.espressif.com/projects/esp-idf/) at `~/esp/esp-idf` (or set `IDF_PATH`)
+- Python 3.12+ with project `.venv` for pytest/esptool
 
 ```bash
-# Once firmware/ is scaffolded:
+# One-time: ESP-IDF (if not installed)
+git clone --recursive -b v5.4.1 https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+~/esp/esp-idf/install.sh esp32s3
+
+# One-time: Python tooling
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# Each shell session
+source tools/setup_env.sh
 cd firmware
-idf.py set-target esp32s3
+idf.py set-target esp32s3   # first time only
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-Adjust the serial port for your system.
+Host tests: `.venv/bin/pytest` (hardware tests are marked `@pytest.mark.hardware`).
 
 ## Implementation order
 
@@ -126,4 +135,5 @@ Index: [`04-documentation-index.md`](04-documentation-index.md)
 
 ## Status
 
-Specification and documentation are in place. Firmware implementation has not started yet.
+- Firmware skeleton compiles for ESP32-S3 (stub classes, no features wired yet)
+- Step 2 next: implement `DeviceIdentity`, `ConfigManager`, `WifiManager`, `HealthService`, …
