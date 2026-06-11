@@ -8,10 +8,12 @@
 
 #include "api_context.hpp"
 #include "auth_context.hpp"
+#include "cli_context.hpp"
 #include "config_manager.hpp"
 #include "device_identity.hpp"
 #include "health_service.hpp"
 #include "http_server_service.hpp"
+#include "serial_cli_service.hpp"
 #include "time_sync_service.hpp"
 #include "wifi_manager.hpp"
 
@@ -31,10 +33,12 @@ public:
     const TimeSyncService& timeSyncService() const;
     const HealthService& healthService() const;
     const HttpServerService& httpServer() const;
+    const SerialCliService& serialCli() const;
 
 private:
     bool initializeNvs();
     bool startHttpServer();
+    bool startSerialCli();
 
     DeviceIdentity m_identity;
     ConfigManager m_configManager;
@@ -43,5 +47,7 @@ private:
     HealthService m_healthService;
     AuthContext m_authContext;
     HttpServerService m_httpServer;
+    SerialCliService m_serialCli;
     ApiContext m_apiContext = {};
+    CliContext m_cliContext = {};
 };

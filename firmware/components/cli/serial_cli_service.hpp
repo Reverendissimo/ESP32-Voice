@@ -1,26 +1,28 @@
-        /**
-         * @file serial_cli_service.hpp
-         * @brief Owns USB serial CLI session lifecycle.
-         *
-         * Responsibilities:
- * - read commands and print human output
-         *
-         * Non-responsibilities:
- * - config validation internals
- * - HTTP server
-         */
-        #pragma once
+/**
+ * @file serial_cli_service.hpp
+ * @brief Owns USB serial CLI session lifecycle.
+ */
+#pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
 
+#include "cli_context.hpp"
+
 /**
-         * @brief Owns USB serial CLI session lifecycle.
-         */
-        class SerialCliService {
-        public:
-            /**
-     * @brief Starts serial CLI loop.
+ * @brief USB serial interactive CLI service.
+ */
+class SerialCliService {
+public:
+    /**
+     * @brief Initializes console and starts CLI REPL task.
      */
-    bool start();
-        };
+    bool start(const CliContext* context);
+
+    /**
+     * @brief Returns true when CLI task is running.
+     */
+    bool isRunning() const;
+
+private:
+    bool m_running = false;
+};

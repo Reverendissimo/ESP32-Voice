@@ -1,26 +1,20 @@
-        /**
-         * @file cli_command_registry.hpp
-         * @brief Registers and dispatches CLI commands.
-         *
-         * Responsibilities:
- * - help, status, config, wifi commands
-         *
-         * Non-responsibilities:
- * - NVS driver access
- * - Wi-Fi driver internals
-         */
-        #pragma once
+/**
+ * @file cli_command_registry.hpp
+ * @brief Registers and dispatches CLI commands.
+ */
+#pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
 
+#include "cli_context.hpp"
+
 /**
-         * @brief Registers and dispatches CLI commands.
-         */
-        class CliCommandRegistry {
-        public:
-            /**
-     * @brief Registers required CLI commands.
+ * @brief Serial CLI command registration and dispatch.
+ */
+class CliCommandRegistry {
+public:
+    /**
+     * @brief Registers all required CLI commands.
      */
-    bool registerDefaults();
-        };
+    bool registerCommands(const CliContext* context) const;
+};

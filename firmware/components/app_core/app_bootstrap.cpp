@@ -40,6 +40,20 @@ bool AppBootstrap::startHttpServer() {
     return true;
 }
 
+bool AppBootstrap::startSerialCli() {
+    m_cliContext.deviceUid = m_identity.deviceUid();
+    m_cliContext.configManager = &m_configManager;
+    m_cliContext.wifiManager = &m_wifiManager;
+    m_cliContext.timeSyncService = &m_timeSyncService;
+    m_cliContext.healthService = &m_healthService;
+
+    if (!m_serialCli.start(&m_cliContext)) {
+        ESP_LOGE(kTag, "Serial CLI failed to start");
+        return false;
+    }
+    return true;
+}
+
 bool AppBootstrap::start() {
     if (!initializeNvs()) {
         return false;
@@ -70,6 +84,10 @@ bool AppBootstrap::start() {
         return false;
     }
 
+    if (!startSerialCli()) {
+        return false;
+    }
+
     HealthInputs inputs = {};
     inputs.deviceUid = m_identity.deviceUid();
     inputs.deviceName = activeConfig.identity.deviceName;
@@ -82,13 +100,14 @@ bool AppBootstrap::start() {
     if (m_healthService.collect(inputs, health)) {
         ESP_LOGI(
             kTag,
-            "ready uid=%s wifi=%s heap=%lu dirty=%d time_trusted=%d http_port=%u",
+            "ready uid=%s wifi=%s heap=%lu dirty=%d time_trusted=%d http_port=%u cli=%d",
             health.deviceUid,
             health.wifiState,
             static_cast<unsigned long>(health.freeHeap),
             health.configDirty,
             health.timeTrusted,
-            static_cast<unsigned>(activeConfig.network.localHttpPort));
+            static_cast<unsigned>(activeConfig.network.localHttpPort),
+            m_serialCli.isRunning());
     }
 
     return true;
@@ -116,4 +135,8 @@ const HealthService& AppBootstrap::healthService() const {
 
 const HttpServerService& AppBootstrap::httpServer() const {
     return m_httpServer;
+}
+
+const SerialCliService& AppBootstrap::serialCli() const {
+    return m_serialCli;
 }
