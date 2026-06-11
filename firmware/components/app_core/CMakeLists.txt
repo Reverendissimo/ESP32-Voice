@@ -5,5 +5,5 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
-        nvs_flash esp_event config network diagnostics
+        nvs_flash esp_event config network diagnostics api
 )

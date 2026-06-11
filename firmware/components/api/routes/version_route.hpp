@@ -1,6 +1,6 @@
 /**
- * @file health_route.hpp
- * @brief Handles GET /api/v1/health and GET /api/v1/status.
+ * @file version_route.hpp
+ * @brief Handles GET /api/v1/version and GET /api/v1/api/version.
  */
 #pragma once
 
@@ -10,12 +10,12 @@
 #include "esp_http_server.h"
 
 /**
- * @brief Health and status route registration.
+ * @brief Firmware/API version route registration.
  */
-class HealthRoute {
+class VersionRoute {
 public:
     /**
-     * @brief Registers health and status routes.
+     * @brief Registers version routes.
      */
     bool registerRoutes(httpd_handle_t server, const ApiContext* context) const;
 

@@ -135,5 +135,5 @@ Index: [`04-documentation-index.md`](04-documentation-index.md)
 
 ## Status
 
-- **Step 2 done:** identity, config (defaults/saved/active + NVS), Wi-Fi, SNTP, health, bootstrap
-- **Step 3 next:** local REST server (health, version, config routes)
+- **Step 3 done:** local REST server on port 80 — `/health`, `/status`, `/version`, `/config/*`
+- **Step 4 next:** USB serial CLI

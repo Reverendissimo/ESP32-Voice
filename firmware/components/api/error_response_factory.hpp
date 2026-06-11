@@ -1,26 +1,33 @@
-        /**
-         * @file error_response_factory.hpp
-         * @brief Builds structured API error responses.
-         *
-         * Responsibilities:
+/**
+ * @file error_response_factory.hpp
+ * @brief Builds structured API error responses.
+ *
+ * Responsibilities:
  * - stable error schema
  * - request_id propagation
-         *
-         * Non-responsibilities:
+ *
+ * Non-responsibilities:
  * - route-specific validation
-         */
-        #pragma once
+ */
+#pragma once
 
-#include <stdint.h>
-#include <stdbool.h>
+#include <stddef.h>
 
 /**
-         * @brief Builds structured API error responses.
-         */
-        class ErrorResponseFactory {
-        public:
-            /**
-     * @brief Builds INVALID_REQUEST payload.
+ * @brief Builds structured API error JSON payloads.
+ */
+class ErrorResponseFactory {
+public:
+    /**
+     * @brief Builds a standard error JSON object into outBuffer.
+     *
+     * @return true when the response fit in outBuffer.
      */
-    bool buildInvalidRequest();
-        };
+    bool build(
+        const char* code,
+        const char* message,
+        bool retryable,
+        const char* requestId,
+        char* outBuffer,
+        size_t outBufferLen) const;
+};

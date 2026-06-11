@@ -22,6 +22,24 @@ bool AppBootstrap::initializeNvs() {
     return true;
 }
 
+bool AppBootstrap::startHttpServer() {
+    const config::AppConfig& activeConfig = m_configManager.active();
+    m_authContext.configure(activeConfig.auth.token);
+
+    m_apiContext.deviceUid = m_identity.deviceUid();
+    m_apiContext.configManager = &m_configManager;
+    m_apiContext.wifiManager = &m_wifiManager;
+    m_apiContext.timeSyncService = &m_timeSyncService;
+    m_apiContext.healthService = &m_healthService;
+    m_apiContext.authContext = &m_authContext;
+
+    if (!m_httpServer.start(activeConfig.network.localHttpPort, &m_apiContext)) {
+        ESP_LOGE(kTag, "HTTP server failed to start");
+        return false;
+    }
+    return true;
+}
+
 bool AppBootstrap::start() {
     if (!initializeNvs()) {
         return false;
@@ -48,6 +66,10 @@ bool AppBootstrap::start() {
         ESP_LOGW(kTag, "SNTP start failed");
     }
 
+    if (!startHttpServer()) {
+        return false;
+    }
+
     HealthInputs inputs = {};
     inputs.deviceUid = m_identity.deviceUid();
     inputs.deviceName = activeConfig.identity.deviceName;
@@ -60,12 +82,13 @@ bool AppBootstrap::start() {
     if (m_healthService.collect(inputs, health)) {
         ESP_LOGI(
             kTag,
-            "ready uid=%s wifi=%s heap=%lu dirty=%d time_trusted=%d",
+            "ready uid=%s wifi=%s heap=%lu dirty=%d time_trusted=%d http_port=%u",
             health.deviceUid,
             health.wifiState,
             static_cast<unsigned long>(health.freeHeap),
             health.configDirty,
-            health.timeTrusted);
+            health.timeTrusted,
+            static_cast<unsigned>(activeConfig.network.localHttpPort));
     }
 
     return true;
@@ -89,4 +112,8 @@ const TimeSyncService& AppBootstrap::timeSyncService() const {
 
 const HealthService& AppBootstrap::healthService() const {
     return m_healthService;
+}
+
+const HttpServerService& AppBootstrap::httpServer() const {
+    return m_httpServer;
 }
