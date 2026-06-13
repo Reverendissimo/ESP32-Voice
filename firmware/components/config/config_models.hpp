@@ -17,6 +17,7 @@
 namespace config {
 
 constexpr uint32_t kSchemaVersion = 1;
+constexpr uint16_t kMaxUtterancePaddingMs = 5000;
 
 struct IdentityConfig {
     char deviceName[32];
@@ -50,6 +51,8 @@ struct PresenceConfig {
 struct VadConfig {
     uint16_t speechStartThreshold;
     uint16_t silenceFinalizeMs;
+    uint16_t preRollPaddingMs;
+    uint16_t postRollPaddingMs;
 };
 
 struct AudioConfig {

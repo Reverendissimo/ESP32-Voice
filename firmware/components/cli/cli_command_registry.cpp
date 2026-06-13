@@ -78,6 +78,8 @@ void printConfig(const config::AppConfig& config, bool dirty) {
            config.callbacks.heartbeatUrl[0] != '\0' ? config.callbacks.heartbeatUrl : "(empty)");
     printf("vad_speech_threshold: %u\n", static_cast<unsigned>(config.vad.speechStartThreshold));
     printf("vad_silence_finalize_ms: %u\n", static_cast<unsigned>(config.vad.silenceFinalizeMs));
+    printf("vad_pre_roll_padding_ms: %u\n", static_cast<unsigned>(config.vad.preRollPaddingMs));
+    printf("vad_post_roll_padding_ms: %u\n", static_cast<unsigned>(config.vad.postRollPaddingMs));
     printf("timezone: %s\n", config.time.timezone);
     printf("sntp_server: %s\n", config.time.sntpServer);
     printf("dirty: %s\n", dirty ? "yes" : "no");
@@ -158,6 +160,7 @@ int cmdHelp(int argc, char** argv) {
         "  heartbeat_url_set <url>\n"
         "  http_port_set <port>\n"
         "  vad_set <speech_threshold> <silence_ms>\n"
+        "  vad_padding_set <pre_roll_ms> <post_roll_ms>\n"
         "  time_set <timezone> <sntp_server>\n"
         "  display_show <mode> [title] [subtitle]\n"
         "  audio_diag\n"
@@ -374,6 +377,49 @@ int cmdVadSet(int argc, char** argv) {
     return 0;
 }
 
+int cmdVadPaddingSet(int argc, char** argv) {
+    if (argc < 3) {
+        printf("Usage: vad_padding_set <pre_roll_ms> <post_roll_ms>\n");
+        printf("Example: vad_padding_set 1000 1000\n");
+        printf("Set to 0 to disable pre-roll or post-roll padding\n");
+        return 1;
+    }
+
+    const long preRollMs = strtol(argv[1], nullptr, 10);
+    const long postRollMs = strtol(argv[2], nullptr, 10);
+    if (preRollMs < 0 || preRollMs > static_cast<long>(config::kMaxUtterancePaddingMs)) {
+        printf(
+            "vad_padding_set failed: pre_roll_ms must be 0-%u\n",
+            static_cast<unsigned>(config::kMaxUtterancePaddingMs));
+        return 1;
+    }
+    if (postRollMs < 0 || postRollMs > static_cast<long>(config::kMaxUtterancePaddingMs)) {
+        printf(
+            "vad_padding_set failed: post_roll_ms must be 0-%u\n",
+            static_cast<unsigned>(config::kMaxUtterancePaddingMs));
+        return 1;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* vad = cJSON_AddObjectToObject(root, "vad");
+    if (vad == nullptr) {
+        cJSON_Delete(root);
+        return 1;
+    }
+    cJSON_AddNumberToObject(vad, "preRollPaddingMs", static_cast<double>(preRollMs));
+    cJSON_AddNumberToObject(vad, "postRollPaddingMs", static_cast<double>(postRollMs));
+
+    char error[128] = {};
+    if (!applyPatchJson(root, error, sizeof(error))) {
+        cJSON_Delete(root);
+        printf("vad_padding_set failed: %s\n", error[0] != '\0' ? error : "unknown error");
+        return 1;
+    }
+    cJSON_Delete(root);
+    printf("VAD padding updated (active immediately)\n");
+    return 0;
+}
+
 int cmdUiEventUrlSet(int argc, char** argv) {
     if (argc < 2) {
         printf("Usage: ui_event_url_set <url>\n");
@@ -447,7 +493,7 @@ int cmdCallbackBaseSet(int argc, char** argv) {
     }
     cJSON_Delete(root);
 
-    printf("callback_base_url updated (derives /speech and /speech/finalize if not set explicitly)\n");
+    printf("callback_base_url updated (derives /speech/stream and /speech/finalize if not set explicitly)\n");
     printf("Run config_save to persist, then speak to test upload\n");
     return 0;
 }
@@ -455,7 +501,7 @@ int cmdCallbackBaseSet(int argc, char** argv) {
 int cmdCallbacksSet(int argc, char** argv) {
     if (argc < 3) {
         printf("Usage: callbacks_set <speech_url> <finalize_url>\n");
-        printf("Example: callbacks_set http://192.168.1.10:8080/speech http://192.168.1.10:8080/speech/finalize\n");
+        printf("Example: callbacks_set http://192.168.1.10:8080/speech/stream http://192.168.1.10:8080/speech/finalize\n");
         return 1;
     }
 
@@ -690,6 +736,12 @@ int cmdAudioDiag(int argc, char** argv) {
             static_cast<unsigned>(active.vad.speechStartThreshold),
             energyThreshold);
         printf("vad_in_speech: %s\n", s_context->vadService->isInSpeech() ? "yes" : "no");
+        printf(
+            "vad_pre_roll_padding_ms: %u\n",
+            static_cast<unsigned>(active.vad.preRollPaddingMs));
+        printf(
+            "vad_post_roll_padding_ms: %u\n",
+            static_cast<unsigned>(active.vad.postRollPaddingMs));
     }
 
     if (s_context->audioCapture != nullptr) {
@@ -840,10 +892,14 @@ bool CliCommandRegistry::registerCommands(const CliContext* context) const {
            registerCommand("heartbeat_url_set", "heartbeat_url_set <url>", cmdHeartbeatUrlSet) &&
            registerCommand("http_port_set", "http_port_set <port>", cmdHttpPortSet) &&
            registerCommand("vad_set", "vad_set <speech_threshold> <silence_ms>", cmdVadSet) &&
+           registerCommand(
+               "vad_padding_set",
+               "vad_padding_set <pre_roll_ms> <post_roll_ms>",
+               cmdVadPaddingSet) &&
            registerCommand("time_set", "time_set <timezone> <sntp_server>", cmdTimeSet) &&
            registerCommand("display_show", "display_show <mode> [title] [subtitle]", cmdDisplayShow) &&
            registerCommand("audio_diag", "Show audio capture/upload diagnostics", cmdAudioDiag) &&
-           registerCommand("upload_ping", "POST test speech chunk to callback server", cmdUploadPing) &&
+           registerCommand("upload_ping", "POST test speech stream to callback server", cmdUploadPing) &&
            registerCommand("upload_start", "Start/retry upload worker task", cmdUploadStart) &&
            registerCommand("mic_probe", "Direct mic read test (speak during probe)", cmdMicProbe) &&
            registerCommand("config_show", "Show active config (masked)", cmdConfigShow) &&

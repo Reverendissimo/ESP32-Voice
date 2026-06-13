@@ -37,6 +37,15 @@ void AudioCaptureService::configure(
     if (m_vad != nullptr) {
         m_vad->configure(m_vadConfig);
     }
+    updatePreRollCapacity();
+}
+
+void AudioCaptureService::updatePreRollCapacity() {
+    m_preRollFrameCount =
+        static_cast<size_t>(m_vadConfig.preRollPaddingMs / audio::kFrameDurationMs);
+    if (m_preRollFrameCount > audio::kMaxPreRollFrames) {
+        m_preRollFrameCount = audio::kMaxPreRollFrames;
+    }
 }
 
 bool AudioCaptureService::start() {
@@ -49,9 +58,13 @@ bool AudioCaptureService::start() {
     }
 
     const uint8_t hwChannels = m_board->micChannels();
-    constexpr size_t kReadBytes = 1024;
-    (void)hwChannels;
-    m_readBufferSize = kReadBytes;
+    const size_t channels = hwChannels > 0 ? static_cast<size_t>(hwChannels) : 1U;
+    const size_t requiredReadBytes = audio::kBytesPerFrame * channels;
+    if (m_readBuffer != nullptr && m_readBufferSize != requiredReadBytes) {
+        heap_caps_free(m_readBuffer);
+        m_readBuffer = nullptr;
+    }
+    m_readBufferSize = requiredReadBytes;
     if (m_readBuffer == nullptr) {
         m_readBuffer = static_cast<uint8_t*>(
             heap_caps_malloc(m_readBufferSize, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -60,6 +73,16 @@ bool AudioCaptureService::start() {
         ESP_LOGE(kTag, "DMA read buffer alloc failed (%u bytes)", static_cast<unsigned>(m_readBufferSize));
         return false;
     }
+    if (m_preRollRing == nullptr) {
+        m_preRollRing = static_cast<audio::PcmFrame*>(heap_caps_malloc(
+            audio::kMaxPreRollFrames * sizeof(audio::PcmFrame), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (m_preRollRing == nullptr) {
+            ESP_LOGE(kTag, "pre-roll ring PSRAM alloc failed");
+            return false;
+        }
+    }
+    m_preRollWriteIdx = 0;
+    m_preRollFull = false;
 
     m_vad->configure(m_vadConfig);
     m_lastEnergy = 0;
@@ -87,9 +110,12 @@ bool AudioCaptureService::start() {
 
     ESP_LOGI(
         kTag,
-        "capture started %u Hz read_bytes=%u",
+        "capture started %u Hz frame_bytes=%u hw_channels=%u pre_roll_ms=%u post_roll_ms=%u",
         static_cast<unsigned>(m_audio.sampleRateHz),
-        static_cast<unsigned>(m_readBufferSize));
+        static_cast<unsigned>(audio::kBytesPerFrame),
+        static_cast<unsigned>(hwChannels),
+        static_cast<unsigned>(m_vadConfig.preRollPaddingMs),
+        static_cast<unsigned>(m_vadConfig.postRollPaddingMs));
     return true;
 }
 
@@ -145,6 +171,36 @@ uint32_t AudioCaptureService::maxSampleAbs() const {
     return m_maxSampleAbs;
 }
 
+void AudioCaptureService::pushPreRoll(const audio::PcmFrame& frame) {
+    if (m_preRollRing == nullptr || m_preRollFrameCount == 0) {
+        return;
+    }
+    m_preRollRing[m_preRollWriteIdx] = frame;
+    m_preRollWriteIdx = (m_preRollWriteIdx + 1) % m_preRollFrameCount;
+    if (m_preRollWriteIdx == 0) {
+        m_preRollFull = true;
+    }
+}
+
+void AudioCaptureService::flushPreRoll() {
+    if (m_preRollRing == nullptr || m_preRollFrameCount == 0 || m_utteranceFsm == nullptr ||
+        m_upload == nullptr) {
+        return;
+    }
+
+    const size_t frameCount = m_preRollFull ? m_preRollFrameCount : m_preRollWriteIdx;
+    const size_t startIdx = m_preRollFull ? m_preRollWriteIdx : 0;
+    for (size_t i = 0; i < frameCount; ++i) {
+        const size_t idx = (startIdx + i) % m_preRollFrameCount;
+        m_upload->uploadChunk(
+            m_utteranceFsm->utteranceId(),
+            m_utteranceFsm->sessionId(),
+            reinterpret_cast<const uint8_t*>(m_preRollRing[idx].samples),
+            audio::kBytesPerFrame);
+    }
+    ESP_LOGI(kTag, "pre-roll flushed frames=%u", static_cast<unsigned>(frameCount));
+}
+
 void AudioCaptureService::captureTask(void* arg) {
     auto* self = static_cast<AudioCaptureService*>(arg);
     if (self != nullptr) {
@@ -164,10 +220,16 @@ void AudioCaptureService::runCaptureLoop() {
 
     const uint8_t hwChannels = m_board->micChannels();
     const size_t monoBytes = audio::kBytesPerFrame;
+    const size_t hwFrameBytes = monoBytes * (hwChannels > 0 ? static_cast<size_t>(hwChannels) : 1U);
+    if (m_readBufferSize != hwFrameBytes) {
+        ESP_LOGE(kTag, "read buffer size mismatch");
+        m_running = false;
+        return;
+    }
     audio::PcmFrame frame = {};
 
     while (m_running) {
-        const int readRc = esp_codec_dev_read(mic, m_readBuffer, static_cast<int>(m_readBufferSize));
+        const int readRc = esp_codec_dev_read(mic, m_readBuffer, static_cast<int>(hwFrameBytes));
         if (readRc != ESP_CODEC_DEV_OK) {
             ++m_readFailCount;
             if (m_readFailCount == 1 || (m_readFailCount % 500U) == 0U) {
@@ -224,9 +286,16 @@ void AudioCaptureService::runCaptureLoop() {
         }
 
         const audio::VadEventType event = m_vad->processFrame(frame.samples, monoSampleCount);
-        m_utteranceFsm->handleVadEvent(event, audio::kFrameDurationMs);
 
-        if (m_utteranceFsm->isStreaming()) {
+        if (event == audio::VadEventType::SpeechStart && m_utteranceFsm->state() == UtteranceState::Idle) {
+            m_utteranceFsm->handleVadEvent(event, audio::kFrameDurationMs);
+            flushPreRoll();
+        } else {
+            m_utteranceFsm->handleVadEvent(event, audio::kFrameDurationMs);
+        }
+        m_utteranceFsm->onFrameTick(audio::kFrameDurationMs);
+
+        if (m_utteranceFsm->shouldUpload()) {
             m_upload->uploadChunk(
                 m_utteranceFsm->utteranceId(),
                 m_utteranceFsm->sessionId(),
@@ -234,6 +303,6 @@ void AudioCaptureService::runCaptureLoop() {
                 monoBytes);
         }
 
-        vTaskDelay(1);
+        pushPreRoll(frame);
     }
 }

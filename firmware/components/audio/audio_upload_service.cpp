@@ -19,6 +19,9 @@ static const char* kTag = "audio_upload";
 
 namespace {
 
+constexpr int kStreamTimeoutMs = 60000;
+constexpr int kFinalizeTimeoutMs = 5000;
+
 bool isUrlConfigured(const char* url) {
     return url != nullptr && url[0] != '\0';
 }
@@ -30,7 +33,7 @@ esp_http_client_handle_t makeHttpClient(const char* url, int timeoutMs) {
     config.transport_type = HTTP_TRANSPORT_OVER_TCP;
     config.timeout_ms = timeoutMs;
     config.buffer_size = 2048;
-    config.buffer_size_tx = 2048;
+    config.buffer_size_tx = 4096;
     config.keep_alive_enable = true;
     config.keep_alive_idle = 5;
     config.keep_alive_interval = 5;
@@ -116,13 +119,16 @@ bool AudioUploadService::start() {
 
     ESP_LOGI(
         kTag,
-        "upload worker started batch_frames=%u",
+        "upload worker started protocol=A3 batch_frames=%u",
         static_cast<unsigned>(audio::kUploadBatchFrames));
     return true;
 }
 
 void AudioUploadService::stop() {
     m_running = false;
+    if (m_streamOpen) {
+        closeStream();
+    }
     if (m_taskHandle != nullptr) {
         vTaskDelay(pdMS_TO_TICKS(50));
         vTaskDelete(static_cast<TaskHandle_t>(m_taskHandle));
@@ -132,9 +138,9 @@ void AudioUploadService::stop() {
         vQueueDelete(static_cast<QueueHandle_t>(m_queue));
         m_queue = nullptr;
     }
-    if (m_speechHttpClient != nullptr) {
-        esp_http_client_cleanup(static_cast<esp_http_client_handle_t>(m_speechHttpClient));
-        m_speechHttpClient = nullptr;
+    if (m_streamClient != nullptr) {
+        esp_http_client_cleanup(static_cast<esp_http_client_handle_t>(m_streamClient));
+        m_streamClient = nullptr;
     }
     if (m_finalizeHttpClient != nullptr) {
         esp_http_client_cleanup(static_cast<esp_http_client_handle_t>(m_finalizeHttpClient));
@@ -145,6 +151,8 @@ void AudioUploadService::stop() {
         m_batchBuffer = nullptr;
     }
     resetBatch();
+    m_streamOpen = false;
+    m_streamBytesWritten = 0;
 }
 
 bool AudioUploadService::isConfigured() const {
@@ -171,6 +179,162 @@ uint32_t AudioUploadService::chunksDroppedCount() const {
     return m_chunksDropped;
 }
 
+bool AudioUploadService::openStream(const char* utteranceId, const char* sessionId) {
+    if (!isUrlConfigured(m_callbacks.speechUrl) || utteranceId == nullptr || sessionId == nullptr) {
+        return false;
+    }
+    if (m_streamOpen) {
+        closeStream();
+    }
+
+    m_streamClient = makeHttpClient(m_callbacks.speechUrl, kStreamTimeoutMs);
+    if (m_streamClient == nullptr) {
+        return false;
+    }
+
+    auto* client = static_cast<esp_http_client_handle_t>(m_streamClient);
+    esp_http_client_set_url(client, m_callbacks.speechUrl);
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
+    esp_http_client_set_header(client, "X-Protocol", "A3");
+    esp_http_client_set_header(client, "X-Device-Uid", m_deviceUid);
+    esp_http_client_set_header(client, "X-Device-Name", m_deviceName);
+    esp_http_client_set_header(client, "X-Utterance-Id", utteranceId);
+    esp_http_client_set_header(client, "X-Session-Id", sessionId);
+    if (m_authToken[0] != '\0') {
+        esp_http_client_set_header(client, "X-Auth-Token", m_authToken);
+    }
+
+    char headerValue[16] = {};
+    snprintf(headerValue, sizeof(headerValue), "%u", static_cast<unsigned>(m_audio.sampleRateHz));
+    esp_http_client_set_header(client, "X-Sample-Rate", headerValue);
+    snprintf(headerValue, sizeof(headerValue), "%u", static_cast<unsigned>(m_audio.channels));
+    esp_http_client_set_header(client, "X-Channels", headerValue);
+    esp_http_client_set_header(client, "X-Sample-Format", "s16le");
+
+    const esp_err_t err = esp_http_client_open(client, -1);
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "stream open failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        m_streamClient = nullptr;
+        return false;
+    }
+
+    m_streamOpen = true;
+    m_streamBytesWritten = 0;
+    ESP_LOGI(kTag, "stream opened id=%s url=%s", utteranceId, m_callbacks.speechUrl);
+    return true;
+}
+
+bool AudioUploadService::writeRaw(const uint8_t* data, size_t len) {
+    if (!m_streamOpen || m_streamClient == nullptr || data == nullptr || len == 0) {
+        return false;
+    }
+
+    auto* client = static_cast<esp_http_client_handle_t>(m_streamClient);
+    size_t offset = 0;
+    while (offset < len) {
+        const int written = esp_http_client_write(
+            client,
+            reinterpret_cast<const char*>(data + offset),
+            static_cast<int>(len - offset));
+        if (written <= 0) {
+            ESP_LOGW(
+                kTag,
+                "stream raw write failed at offset=%u/%u",
+                static_cast<unsigned>(offset),
+                static_cast<unsigned>(len));
+            return false;
+        }
+        offset += static_cast<size_t>(written);
+    }
+    return true;
+}
+
+bool AudioUploadService::writeStream(const uint8_t* pcm, size_t pcmLen) {
+    if (!m_streamOpen || m_streamClient == nullptr || pcm == nullptr || pcmLen == 0) {
+        return false;
+    }
+
+    // esp_http_client_open(-1) sets Transfer-Encoding: chunked but does not frame writes.
+    char chunkHeader[16] = {};
+    const int headerLen = snprintf(chunkHeader, sizeof(chunkHeader), "%x\r\n", static_cast<unsigned>(pcmLen));
+    if (headerLen <= 0 || static_cast<size_t>(headerLen) >= sizeof(chunkHeader)) {
+        return false;
+    }
+
+    if (!writeRaw(reinterpret_cast<const uint8_t*>(chunkHeader), static_cast<size_t>(headerLen))) {
+        return false;
+    }
+    if (!writeRaw(pcm, pcmLen)) {
+        return false;
+    }
+    static const uint8_t kChunkEnd[] = {'\r', '\n'};
+    if (!writeRaw(kChunkEnd, sizeof(kChunkEnd))) {
+        return false;
+    }
+
+    m_streamBytesWritten += static_cast<uint32_t>(pcmLen);
+    return true;
+}
+
+void AudioUploadService::abortStream() {
+    if (!m_streamOpen || m_streamClient == nullptr) {
+        m_streamOpen = false;
+        m_streamBytesWritten = 0;
+        return;
+    }
+
+    auto* client = static_cast<esp_http_client_handle_t>(m_streamClient);
+    static const char kChunkTerminator[] = "0\r\n\r\n";
+    writeRaw(reinterpret_cast<const uint8_t*>(kChunkTerminator), sizeof(kChunkTerminator) - 1);
+    esp_http_client_fetch_headers(client);
+    esp_http_client_cleanup(client);
+    m_streamClient = nullptr;
+    m_streamOpen = false;
+    m_streamBytesWritten = 0;
+}
+
+bool AudioUploadService::closeStream() {
+    if (!m_streamOpen || m_streamClient == nullptr) {
+        m_streamOpen = false;
+        return true;
+    }
+
+    auto* client = static_cast<esp_http_client_handle_t>(m_streamClient);
+    const uint32_t bytesWritten = m_streamBytesWritten;
+    static const char kChunkTerminator[] = "0\r\n\r\n";
+    if (!writeRaw(reinterpret_cast<const uint8_t*>(kChunkTerminator), sizeof(kChunkTerminator) - 1)) {
+        abortStream();
+        ++m_postsFail;
+        ESP_LOGW(kTag, "stream terminator write failed bytes=%lu", static_cast<unsigned long>(bytesWritten));
+        return false;
+    }
+
+    if (esp_http_client_fetch_headers(client) < 0) {
+        abortStream();
+        ++m_postsFail;
+        ESP_LOGW(kTag, "stream response headers failed bytes=%lu", static_cast<unsigned long>(bytesWritten));
+        return false;
+    }
+
+    const int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    m_streamClient = nullptr;
+    m_streamOpen = false;
+    m_streamBytesWritten = 0;
+
+    if (status < 200 || status >= 300) {
+        ++m_postsFail;
+        ESP_LOGW(kTag, "stream close status=%d bytes=%lu", status, static_cast<unsigned long>(bytesWritten));
+        return false;
+    }
+
+    ++m_postsOk;
+    ESP_LOGI(kTag, "stream closed status=%d bytes=%lu", status, static_cast<unsigned long>(bytesWritten));
+    return true;
+}
+
 bool AudioUploadService::pingServer() {
     if (!isConfigured()) {
         ESP_LOGW(kTag, "ping: speech callbacks not configured");
@@ -178,98 +342,16 @@ bool AudioUploadService::pingServer() {
     }
 
     uint8_t silence[audio::kBytesPerFrame] = {};
-    AudioProtocol protocol;
-    if (!protocol.buildSpeechChunk(
-            m_deviceUid,
-            m_deviceName,
-            "ping_test",
-            m_activeSessionId[0] != '\0' ? m_activeSessionId : "ping_sess",
-            0,
-            m_audio.sampleRateHz,
-            m_audio.channels,
-            silence,
-            sizeof(silence),
-            m_postBody,
-            sizeof(m_postBody))) {
-        ESP_LOGW(kTag, "ping: failed to build chunk JSON");
+    ESP_LOGI(kTag, "ping: POST stream %s", m_callbacks.speechUrl);
+    if (!openStream("ping_test", "ping_sess")) {
         return false;
     }
-
-    ESP_LOGI(kTag, "ping: POST %s", m_callbacks.speechUrl);
-    return postJson(m_callbacks.speechUrl, m_postBody);
-}
-
-bool AudioUploadService::postJson(const char* url, const char* body) {
-    if (!isUrlConfigured(url) || body == nullptr) {
-        return false;
+    const bool wrote = writeStream(silence, sizeof(silence));
+    const bool ok = wrote && closeStream();
+    if (!ok) {
+        ESP_LOGW(kTag, "ping: stream failed");
     }
-
-    esp_http_client_handle_t client = makeHttpClient(url, 5000);
-    if (client == nullptr) {
-        return false;
-    }
-
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    if (m_authToken[0] != '\0') {
-        esp_http_client_set_header(client, "X-Auth-Token", m_authToken);
-    }
-    esp_http_client_set_post_field(client, body, static_cast<int>(strlen(body)));
-
-    const esp_err_t err = esp_http_client_perform(client);
-    const int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-
-    if (err != ESP_OK) {
-        ++m_postsFail;
-        ESP_LOGW(kTag, "HTTP POST failed: %s url=%s", esp_err_to_name(err), url);
-        return false;
-    }
-    if (status < 200 || status >= 300) {
-        ++m_postsFail;
-        ESP_LOGW(kTag, "HTTP POST status=%d url=%s", status, url);
-        return false;
-    }
-    ++m_postsOk;
-    return true;
-}
-
-bool AudioUploadService::postSpeechJson(const char* body) {
-    if (!isUrlConfigured(m_callbacks.speechUrl) || body == nullptr) {
-        return false;
-    }
-
-    if (m_speechHttpClient == nullptr) {
-        m_speechHttpClient = makeHttpClient(m_callbacks.speechUrl, 3000);
-        if (m_speechHttpClient == nullptr) {
-            return false;
-        }
-    }
-
-    auto* client = static_cast<esp_http_client_handle_t>(m_speechHttpClient);
-    esp_http_client_set_url(client, m_callbacks.speechUrl);
-    esp_http_client_set_method(client, HTTP_METHOD_POST);
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    if (m_authToken[0] != '\0') {
-        esp_http_client_set_header(client, "X-Auth-Token", m_authToken);
-    }
-    esp_http_client_set_post_field(client, body, static_cast<int>(strlen(body)));
-
-    const esp_err_t err = esp_http_client_perform(client);
-    const int status = esp_http_client_get_status_code(client);
-    if (err != ESP_OK) {
-        ++m_postsFail;
-        esp_http_client_cleanup(client);
-        m_speechHttpClient = nullptr;
-        ESP_LOGW(kTag, "speech POST failed: %s", esp_err_to_name(err));
-        return false;
-    }
-    if (status < 200 || status >= 300) {
-        ++m_postsFail;
-        ESP_LOGW(kTag, "speech POST status=%d", status);
-        return false;
-    }
-    ++m_postsOk;
-    return true;
+    return ok;
 }
 
 bool AudioUploadService::postFinalizeJson(const char* body) {
@@ -278,7 +360,7 @@ bool AudioUploadService::postFinalizeJson(const char* body) {
     }
 
     if (m_finalizeHttpClient == nullptr) {
-        m_finalizeHttpClient = makeHttpClient(m_callbacks.speechFinalizeUrl, 3000);
+        m_finalizeHttpClient = makeHttpClient(m_callbacks.speechFinalizeUrl, kFinalizeTimeoutMs);
         if (m_finalizeHttpClient == nullptr) {
             return false;
         }
@@ -312,34 +394,28 @@ bool AudioUploadService::postFinalizeJson(const char* body) {
 }
 
 bool AudioUploadService::sendChunkJob(UploadJob& job) {
-    AudioProtocol protocol;
     if (job.pcm == nullptr || job.pcmLen == 0) {
         freeJobPcm(job);
         return false;
     }
-
-    if (!protocol.buildSpeechChunk(
-            m_deviceUid,
-            m_deviceName,
-            job.utteranceId,
-            job.sessionId,
-            job.chunkSeq,
-            m_audio.sampleRateHz,
-            m_audio.channels,
-            job.pcm,
-            job.pcmLen,
-            m_postBody,
-            sizeof(m_postBody))) {
-        ESP_LOGW(kTag, "chunk JSON too large seq=%lu pcm=%u", static_cast<unsigned long>(job.chunkSeq),
-                 static_cast<unsigned>(job.pcmLen));
+    if (m_streamBroken) {
         freeJobPcm(job);
         return false;
     }
 
-    const bool ok = postSpeechJson(m_postBody);
+    if (!m_streamOpen) {
+        if (!openStream(job.utteranceId, job.sessionId)) {
+            freeJobPcm(job);
+            return false;
+        }
+    }
+
+    const bool ok = writeStream(job.pcm, job.pcmLen);
     freeJobPcm(job);
 
     if (!ok) {
+        m_streamBroken = true;
+        abortStream();
         return false;
     }
 
@@ -349,10 +425,11 @@ bool AudioUploadService::sendChunkJob(UploadJob& job) {
     if ((job.chunkSeq % 5U) == 0U) {
         ESP_LOGI(
             kTag,
-            "chunk uploaded id=%s seq=%lu pcm_bytes=%u ok=%lu dropped=%lu",
+            "stream write id=%s seq=%lu pcm_bytes=%u total=%lu ok=%lu dropped=%lu",
             job.utteranceId,
             static_cast<unsigned long>(job.chunkSeq),
             static_cast<unsigned>(job.pcmLen),
+            static_cast<unsigned long>(m_streamBytesWritten),
             static_cast<unsigned long>(m_postsOk),
             static_cast<unsigned long>(m_chunksDropped));
     }
@@ -360,6 +437,12 @@ bool AudioUploadService::sendChunkJob(UploadJob& job) {
 }
 
 bool AudioUploadService::sendFinalizeJob(const UploadJob& job) {
+    if (m_streamOpen) {
+        if (!closeStream()) {
+            ESP_LOGW(kTag, "stream close failed before finalize id=%s", job.utteranceId);
+        }
+    }
+
     AudioProtocol protocol;
     char finalizeBody[512] = {};
     if (!protocol.buildSpeechFinalize(
@@ -407,6 +490,7 @@ void AudioUploadService::runUploadLoop() {
             m_activeUtteranceId[0] = '\0';
             m_activeSessionId[0] = '\0';
             m_nextChunkSeq = 0;
+            m_streamBroken = false;
             resetBatch();
         }
     }
@@ -426,6 +510,7 @@ bool AudioUploadService::startUtterance(const char* utteranceId, const char* ses
     m_activeUtteranceId[sizeof(m_activeUtteranceId) - 1] = '\0';
     m_activeSessionId[sizeof(m_activeSessionId) - 1] = '\0';
     m_nextChunkSeq = 0;
+    m_streamBroken = false;
     resetBatch();
     ESP_LOGI(kTag, "utterance upload armed id=%s", utteranceId);
     return true;

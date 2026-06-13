@@ -95,7 +95,7 @@ bool AppBootstrap::startAudioPipeline() {
         m_identity.deviceUid(),
         activeConfig.identity.deviceName,
         activeConfig.auth.token);
-    m_utteranceStateMachine.configure(&m_audioUploadService, m_sessionId);
+    m_utteranceStateMachine.configure(&m_audioUploadService, m_sessionId, activeConfig.vad);
     m_audioUploadService.setStateMachine(&m_utteranceStateMachine);
 
     m_vadService.configure(activeConfig.vad);
@@ -225,6 +225,14 @@ void AppBootstrap::reloadRuntimeConfig() {
 
     m_authContext.configure(activeConfig.auth.token);
     m_vadService.configure(activeConfig.vad);
+    m_utteranceStateMachine.configure(&m_audioUploadService, m_sessionId, activeConfig.vad);
+    m_audioCaptureService.configure(
+        &m_audioBoard,
+        &m_vadService,
+        &m_utteranceStateMachine,
+        &m_audioUploadService,
+        activeConfig.audio,
+        activeConfig.vad);
 
     config::CallbacksConfig resolvedCallbacks = {};
     config::resolveCallbacks(activeConfig, resolvedCallbacks);

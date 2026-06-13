@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Minimal REST server for ESP32-Voice protocol A2 speech upload testing.
+Minimal REST server for ESP32-Voice speech upload testing.
 
 Endpoints (under --prefix, default /api/v1):
-  POST /speech          - receive PCM chunks (JSON + pcm_b64)
-  POST /speech/finalize - assemble utterance, save WAV, optional echo playback
-  GET  /status          - recent utterances and saved recordings
+  POST /speech/stream    - receive streamed PCM (A3 binary chunked HTTP)
+  POST /speech           - receive PCM chunks (legacy A2 JSON + pcm_b64)
+  POST /speech/finalize  - finalize utterance, save WAV, optional echo playback
+  GET  /status           - recent utterances and saved recordings
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ import argparse
 import base64
 import binascii
 import json
-import os
 import sys
 import threading
 import wave
@@ -46,6 +46,10 @@ class Utterance:
     device_uid: str
     device_name: str
     chunks: dict[int, Chunk] = field(default_factory=dict)
+    pcm: bytes = b""
+    sample_rate_hz: int = 16000
+    channels: int = 1
+    protocol: str = "A3"
     started_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -78,26 +82,63 @@ class SpeechStore:
                     session_id=str(payload.get("session_id", "")),
                     device_uid=str(payload.get("device_uid", "")),
                     device_name=str(payload.get("device_name", "")),
+                    protocol="A2",
                 )
                 self._active[utterance_id] = utt
             utt.chunks[chunk.seq] = chunk
+
+    def add_stream(
+        self,
+        *,
+        utterance_id: str,
+        session_id: str,
+        device_uid: str,
+        device_name: str,
+        pcm: bytes,
+        sample_rate_hz: int,
+        channels: int,
+    ) -> None:
+        with self._lock:
+            self._active[utterance_id] = Utterance(
+                utterance_id=utterance_id,
+                session_id=session_id,
+                device_uid=device_uid,
+                device_name=device_name,
+                pcm=pcm,
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+                protocol="A3",
+            )
 
     def finalize(self, payload: dict[str, Any]) -> dict[str, Any]:
         utterance_id = str(payload["utterance_id"])
         with self._lock:
             utt = self._active.pop(utterance_id, None)
 
-        if utt is None or not utt.chunks:
+        if utt is None:
             return {
                 "ok": False,
-                "error": "unknown or empty utterance",
+                "error": "unknown utterance",
                 "utterance_id": utterance_id,
             }
 
-        ordered = [utt.chunks[k] for k in sorted(utt.chunks)]
-        sample_rate = ordered[0].sample_rate_hz
-        channels = ordered[0].channels
-        pcm = b"".join(c.pcm for c in ordered)
+        if utt.pcm:
+            pcm = utt.pcm
+            sample_rate = utt.sample_rate_hz
+            channels = utt.channels
+            chunks_received = int(payload.get("chunk_count", 0))
+        elif utt.chunks:
+            ordered = [utt.chunks[k] for k in sorted(utt.chunks)]
+            sample_rate = ordered[0].sample_rate_hz
+            channels = ordered[0].channels
+            pcm = b"".join(c.pcm for c in ordered)
+            chunks_received = len(ordered)
+        else:
+            return {
+                "ok": False,
+                "error": "empty utterance",
+                "utterance_id": utterance_id,
+            }
 
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in utterance_id)
         wav_path = self.recordings_dir / f"{safe_id}.wav"
@@ -108,14 +149,15 @@ class SpeechStore:
             wf.writeframes(pcm)
 
         duration_ms = int(payload.get("duration_ms", 0))
-        chunk_count = int(payload.get("chunk_count", len(ordered)))
+        chunk_count = int(payload.get("chunk_count", chunks_received))
         record = {
             "utterance_id": utterance_id,
             "session_id": utt.session_id,
             "device_uid": utt.device_uid,
             "device_name": utt.device_name,
+            "protocol": utt.protocol,
             "chunk_count": chunk_count,
-            "chunks_received": len(ordered),
+            "chunks_received": chunks_received,
             "duration_ms": duration_ms,
             "sample_rate_hz": sample_rate,
             "channels": channels,
@@ -129,8 +171,8 @@ class SpeechStore:
             self._history = self._history[:20]
 
         print(
-            f"[speech] {utt.device_uid} {utterance_id}: "
-            f"{len(ordered)} chunks, {len(pcm)} bytes -> {wav_path}",
+            f"[speech] {utt.device_uid} {utterance_id} ({utt.protocol}): "
+            f"{chunks_received} segments, {len(pcm)} bytes -> {wav_path}",
             flush=True,
         )
         return {"ok": True, **record}
@@ -141,7 +183,9 @@ class SpeechStore:
                 {
                     "utterance_id": u.utterance_id,
                     "device_uid": u.device_uid,
+                    "protocol": u.protocol,
                     "chunks": len(u.chunks),
+                    "pcm_bytes": len(u.pcm),
                 }
                 for u in self._active.values()
             ]
@@ -214,6 +258,36 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return data
 
+    def _read_chunked_body(self) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            line = self.rfile.readline()
+            if not line:
+                break
+            size_line = line.strip().split(b";", 1)[0]
+            if not size_line:
+                continue
+            chunk_size = int(size_line, 16)
+            if chunk_size == 0:
+                self.rfile.readline()
+                break
+            chunks.append(self.rfile.read(chunk_size))
+            self.rfile.readline()
+        return b"".join(chunks)
+
+    def _read_binary_body(self) -> bytes:
+        transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
+        if "chunked" in transfer_encoding:
+            return self._read_chunked_body()
+
+        length = self.headers.get("Content-Length")
+        if length is not None:
+            return self.rfile.read(int(length))
+        return self.rfile.read()
+
+    def _header(self, name: str, default: str = "") -> str:
+        return self.headers.get(name, default)
+
     def _send_json(self, code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
@@ -239,6 +313,7 @@ class Handler(BaseHTTPRequestHandler):
             lines = [
                 "ESP32-Voice test server",
                 "",
+                f"POST {self.cfg.prefix}/speech/stream",
                 f"POST {self.cfg.prefix}/speech",
                 f"POST {self.cfg.prefix}/speech/finalize",
                 f"GET  {self.cfg.prefix}/status",
@@ -256,16 +331,67 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"v": 1, "error": {"code": "NOT_FOUND", "message": "Unknown route"}})
 
+    def _handle_speech_stream(self) -> None:
+        protocol = self._header("X-Protocol", "A3")
+        if protocol not in ("A3", ""):
+            self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": "Expected protocol A3"}})
+            return
+
+        utterance_id = self._header("X-Utterance-Id")
+        if not utterance_id:
+            self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": "Missing X-Utterance-Id"}})
+            return
+
+        try:
+            pcm = self._read_binary_body()
+            sample_rate_hz = int(self._header("X-Sample-Rate", "16000"))
+            channels = int(self._header("X-Channels", "1"))
+        except (ValueError, OSError) as exc:
+            self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": str(exc)}})
+            return
+
+        self.cfg.store.add_stream(
+            utterance_id=utterance_id,
+            session_id=self._header("X-Session-Id"),
+            device_uid=self._header("X-Device-Uid"),
+            device_name=self._header("X-Device-Name"),
+            pcm=pcm,
+            sample_rate_hz=sample_rate_hz,
+            channels=channels,
+        )
+        device_uid = self._header("X-Device-Uid", "unknown")
+        duration_s = len(pcm) / (sample_rate_hz * channels * 2) if pcm else 0.0
+        print(
+            f"[stream] {device_uid} {utterance_id}: "
+            f"{len(pcm)} bytes ({sample_rate_hz} Hz, {channels} ch, ~{duration_s:.2f}s)",
+            flush=True,
+        )
+        self._send_json(
+            200,
+            {
+                "v": 1,
+                "ok": True,
+                "protocol": "A3",
+                "utterance_id": utterance_id,
+                "pcm_bytes": len(pcm),
+            },
+        )
+
     def do_POST(self) -> None:
         path = self._route_path()
+
+        if path == "/speech/stream":
+            self._handle_speech_stream()
+            return
+
         try:
             payload = self._read_json()
         except (json.JSONDecodeError, ValueError) as exc:
             self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": str(exc)}})
             return
 
-        if payload.get("protocol") not in (None, "A2"):
-            self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": "Expected protocol A2"}})
+        if payload.get("protocol") not in (None, "A2", "A3"):
+            self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": "Expected protocol A2 or A3"}})
             return
 
         if path == "/speech":
@@ -311,7 +437,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ESP32-Voice A2 speech test server")
+    parser = argparse.ArgumentParser(description="ESP32-Voice speech test server")
     parser.add_argument("--host", default="0.0.0.0", help="Listen address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8080, help="Listen port (default: 8080)")
     parser.add_argument("--prefix", default="/api/v1", help="URL prefix (default: /api/v1)")
@@ -344,8 +470,11 @@ def main() -> int:
     server.cfg = cfg  # type: ignore[attr-defined]
 
     print(f"Listening on http://{args.host}:{args.port}{cfg.prefix}", flush=True)
-    print(f"  POST {cfg.prefix}/speech", flush=True)
-    print(f"  POST {cfg.prefix}/speech/finalize", flush=True)
+    print("Protocol A3 (primary):", flush=True)
+    print(f"  POST {cfg.prefix}/speech/stream  (binary PCM, chunked HTTP body + X-* headers)", flush=True)
+    print(f"  POST {cfg.prefix}/speech/finalize  (JSON metadata after stream closes)", flush=True)
+    print("Legacy A2:", flush=True)
+    print(f"  POST {cfg.prefix}/speech  (JSON + pcm_b64 per chunk)", flush=True)
     print(f"  GET  {cfg.prefix}/status", flush=True)
     print(f"Recordings -> {recordings}", flush=True)
     if args.echo_device_ip:

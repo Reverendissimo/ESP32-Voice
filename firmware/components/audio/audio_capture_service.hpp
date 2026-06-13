@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "audio_types.hpp"
 #include "config_models.hpp"
 
 class Box3AudioBoard;
@@ -81,4 +82,12 @@ private:
     uint32_t m_maxSampleAbs = 0;
     uint8_t* m_readBuffer = nullptr;
     size_t m_readBufferSize = 0;
+    audio::PcmFrame* m_preRollRing = nullptr;
+    size_t m_preRollWriteIdx = 0;
+    bool m_preRollFull = false;
+    size_t m_preRollFrameCount = 0;
+
+    void updatePreRollCapacity();
+    void pushPreRoll(const audio::PcmFrame& frame);
+    void flushPreRoll();
 };

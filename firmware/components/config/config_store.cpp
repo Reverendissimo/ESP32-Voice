@@ -173,6 +173,8 @@ cJSON* configToJson(const config::AppConfig& config) {
   if (vad != nullptr) {
     cJSON_AddNumberToObject(vad, "speechStartThreshold", config.vad.speechStartThreshold);
     cJSON_AddNumberToObject(vad, "silenceFinalizeMs", config.vad.silenceFinalizeMs);
+    cJSON_AddNumberToObject(vad, "preRollPaddingMs", config.vad.preRollPaddingMs);
+    cJSON_AddNumberToObject(vad, "postRollPaddingMs", config.vad.postRollPaddingMs);
   }
 
     return root;
@@ -217,11 +219,19 @@ bool jsonToConfig(const cJSON* root, config::AppConfig& config) {
     if (cJSON_IsObject(vad)) {
         const cJSON* speechStartThreshold = cJSON_GetObjectItemCaseSensitive(vad, "speechStartThreshold");
         const cJSON* silenceFinalizeMs = cJSON_GetObjectItemCaseSensitive(vad, "silenceFinalizeMs");
+        const cJSON* preRollPaddingMs = cJSON_GetObjectItemCaseSensitive(vad, "preRollPaddingMs");
+        const cJSON* postRollPaddingMs = cJSON_GetObjectItemCaseSensitive(vad, "postRollPaddingMs");
         if (cJSON_IsNumber(speechStartThreshold)) {
             config.vad.speechStartThreshold = static_cast<uint16_t>(speechStartThreshold->valuedouble);
         }
         if (cJSON_IsNumber(silenceFinalizeMs)) {
             config.vad.silenceFinalizeMs = static_cast<uint16_t>(silenceFinalizeMs->valuedouble);
+        }
+        if (cJSON_IsNumber(preRollPaddingMs)) {
+            config.vad.preRollPaddingMs = static_cast<uint16_t>(preRollPaddingMs->valuedouble);
+        }
+        if (cJSON_IsNumber(postRollPaddingMs)) {
+            config.vad.postRollPaddingMs = static_cast<uint16_t>(postRollPaddingMs->valuedouble);
         }
     }
 

@@ -53,6 +53,8 @@ void addConfigObject(cJSON* configObject, const config::AppConfig& config, bool 
     if (vad != nullptr) {
         cJSON_AddNumberToObject(vad, "speechStartThreshold", config.vad.speechStartThreshold);
         cJSON_AddNumberToObject(vad, "silenceFinalizeMs", config.vad.silenceFinalizeMs);
+        cJSON_AddNumberToObject(vad, "preRollPaddingMs", config.vad.preRollPaddingMs);
+        cJSON_AddNumberToObject(vad, "postRollPaddingMs", config.vad.postRollPaddingMs);
     }
     if (time != nullptr) {
         cJSON_AddStringToObject(time, "timezone", config.time.timezone);

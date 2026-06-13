@@ -70,6 +70,15 @@ bool ConfigValidator::validateConfig(const config::AppConfig& config, char* erro
         return false;
     }
 
+    if (config.vad.preRollPaddingMs > config::kMaxUtterancePaddingMs) {
+        setError(errorOut, errorOutLen, "vad.preRollPaddingMs too large");
+        return false;
+    }
+    if (config.vad.postRollPaddingMs > config::kMaxUtterancePaddingMs) {
+        setError(errorOut, errorOutLen, "vad.postRollPaddingMs too large");
+        return false;
+    }
+
     return true;
 }
 
@@ -98,7 +107,8 @@ bool ConfigValidator::validatePatch(const cJSON* patch, char* errorOut, size_t e
     const cJSON* vad = cJSON_GetObjectItemCaseSensitive(patch, "vad");
     if (vad != nullptr) {
         if (!cJSON_IsObject(vad) || !isNumberField(vad, "speechStartThreshold") ||
-            !isNumberField(vad, "silenceFinalizeMs")) {
+            !isNumberField(vad, "silenceFinalizeMs") || !isNumberField(vad, "preRollPaddingMs") ||
+            !isNumberField(vad, "postRollPaddingMs")) {
             setError(errorOut, errorOutLen, "Invalid vad patch");
             return false;
         }

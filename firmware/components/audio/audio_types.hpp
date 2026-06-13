@@ -12,8 +12,10 @@ namespace audio {
 constexpr uint16_t kDefaultSampleRateHz = 16000;
 constexpr uint8_t kDefaultChannels = 1;
 constexpr uint16_t kFrameDurationMs = 20;
+constexpr uint16_t kMaxUtterancePaddingMs = 5000;
 constexpr size_t kSamplesPerFrame = (kDefaultSampleRateHz * kFrameDurationMs) / 1000;
 constexpr size_t kBytesPerFrame = kSamplesPerFrame * sizeof(int16_t);
+constexpr size_t kMaxPreRollFrames = kMaxUtterancePaddingMs / kFrameDurationMs;
 
 constexpr size_t kUploadQueueDepth = 24;
 // Batch mic frames before HTTP POST (~50 frames/s cannot sustain one POST per frame).

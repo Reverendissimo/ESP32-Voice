@@ -142,11 +142,19 @@ bool ConfigManager::applyPatchObject(const cJSON* patch, char* errorOut, size_t 
     if (cJSON_IsObject(vad)) {
         const cJSON* speechStartThreshold = cJSON_GetObjectItemCaseSensitive(vad, "speechStartThreshold");
         const cJSON* silenceFinalizeMs = cJSON_GetObjectItemCaseSensitive(vad, "silenceFinalizeMs");
+        const cJSON* preRollPaddingMs = cJSON_GetObjectItemCaseSensitive(vad, "preRollPaddingMs");
+        const cJSON* postRollPaddingMs = cJSON_GetObjectItemCaseSensitive(vad, "postRollPaddingMs");
         if (cJSON_IsNumber(speechStartThreshold)) {
             candidate.vad.speechStartThreshold = static_cast<uint16_t>(speechStartThreshold->valuedouble);
         }
         if (cJSON_IsNumber(silenceFinalizeMs)) {
             candidate.vad.silenceFinalizeMs = static_cast<uint16_t>(silenceFinalizeMs->valuedouble);
+        }
+        if (cJSON_IsNumber(preRollPaddingMs)) {
+            candidate.vad.preRollPaddingMs = static_cast<uint16_t>(preRollPaddingMs->valuedouble);
+        }
+        if (cJSON_IsNumber(postRollPaddingMs)) {
+            candidate.vad.postRollPaddingMs = static_cast<uint16_t>(postRollPaddingMs->valuedouble);
         }
     }
 

@@ -43,7 +43,7 @@ void resolveCallbacks(const AppConfig& config, CallbacksConfig& out) {
     out = config.callbacks;
 
     if (out.speechUrl[0] == '\0' && config.network.callbackBaseUrl[0] != '\0') {
-        appendPath(out.speechUrl, sizeof(out.speechUrl), config.network.callbackBaseUrl, "/speech");
+        appendPath(out.speechUrl, sizeof(out.speechUrl), config.network.callbackBaseUrl, "/speech/stream");
     }
     if (out.speechFinalizeUrl[0] == '\0' && config.network.callbackBaseUrl[0] != '\0') {
         appendPath(out.speechFinalizeUrl, sizeof(out.speechFinalizeUrl), config.network.callbackBaseUrl, "/speech/finalize");
