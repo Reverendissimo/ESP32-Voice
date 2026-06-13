@@ -15,7 +15,10 @@ constexpr uint16_t kFrameDurationMs = 20;
 constexpr size_t kSamplesPerFrame = (kDefaultSampleRateHz * kFrameDurationMs) / 1000;
 constexpr size_t kBytesPerFrame = kSamplesPerFrame * sizeof(int16_t);
 
-constexpr size_t kUploadQueueDepth = 16;
+constexpr size_t kUploadQueueDepth = 24;
+// Batch mic frames before HTTP POST (~50 frames/s cannot sustain one POST per frame).
+constexpr size_t kUploadBatchFrames = 8;
+constexpr size_t kUploadBatchBytes = kBytesPerFrame * kUploadBatchFrames;
 constexpr size_t kPlaybackQueueDepth = 2;
 // One queued item must fit in FreeRTOS queue storage (internal RAM). 64 KiB × depth OOMs at boot.
 constexpr size_t kMaxPlaybackBytes = 8 * 1024;

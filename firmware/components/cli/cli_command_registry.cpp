@@ -675,6 +675,7 @@ int cmdAudioDiag(int argc, char** argv) {
         printf("upload_posts_ok: %" PRIu32 "\n", s_context->audioUpload->postsOkCount());
         printf("upload_posts_fail: %" PRIu32 "\n", s_context->audioUpload->postsFailCount());
         printf("upload_chunks_queued: %" PRIu32 "\n", s_context->audioUpload->chunksQueuedCount());
+        printf("upload_chunks_dropped: %" PRIu32 "\n", s_context->audioUpload->chunksDroppedCount());
     }
     printf("speech_url_effective: %s\n",
            resolved.speechUrl[0] != '\0' ? resolved.speechUrl : "(empty)");

@@ -44,6 +44,7 @@ public:
     uint32_t postsOkCount() const;
     uint32_t postsFailCount() const;
     uint32_t chunksQueuedCount() const;
+    uint32_t chunksDroppedCount() const;
 
 private:
     enum class JobType : uint8_t {
@@ -66,8 +67,13 @@ private:
     static void uploadTask(void* arg);
     void runUploadLoop();
     bool postJson(const char* url, const char* body);
+    bool postSpeechJson(const char* body);
+    bool postFinalizeJson(const char* body);
+    bool queuePcmJob(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen);
+    bool flushBatch(const char* utteranceId, const char* sessionId);
     bool sendChunkJob(UploadJob& job);
     bool sendFinalizeJob(const UploadJob& job);
+    void resetBatch();
 
     config::CallbacksConfig m_callbacks;
     config::AudioConfig m_audio;
@@ -81,8 +87,13 @@ private:
     bool m_running = false;
     void* m_taskHandle = nullptr;
     void* m_queue = nullptr;
-    char m_postBody[8192] = {};
+    void* m_speechHttpClient = nullptr;
+    void* m_finalizeHttpClient = nullptr;
+    uint8_t* m_batchBuffer = nullptr;
+    size_t m_batchLen = 0;
+    char m_postBody[10240] = {};
     uint32_t m_postsOk = 0;
     uint32_t m_postsFail = 0;
     uint32_t m_chunksQueued = 0;
+    uint32_t m_chunksDropped = 0;
 };
