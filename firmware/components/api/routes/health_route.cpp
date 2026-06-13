@@ -11,6 +11,8 @@
 #include "http_response_helpers.hpp"
 #include "json_response_builder.hpp"
 
+#include <stdlib.h>
+
 static constexpr size_t kResponseBufferSize = 2048;
 
 namespace {
@@ -46,16 +48,26 @@ esp_err_t sendHealth(httpd_req_t* req, const ApiContext* context) {
         return sendJsonResponse(req, 500, body);
     }
 
+    char* body = static_cast<char*>(malloc(kResponseBufferSize));
+    if (body == nullptr) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INTERNAL_ERROR", "Out of memory", false, "", errBody, sizeof(errBody));
+        return sendJsonResponse(req, 500, errBody);
+    }
+
     JsonResponseBuilder builder;
-    char body[kResponseBufferSize] = {};
-    if (!builder.buildHealth(context->deviceUid, snapshot, body, sizeof(body))) {
+    if (!builder.buildHealth(context->deviceUid, snapshot, body, kResponseBufferSize)) {
+        free(body);
         ErrorResponseFactory errors;
         char errBody[256] = {};
         errors.build("INTERNAL_ERROR", "Failed to build health response", false, "", errBody, sizeof(errBody));
         return sendJsonResponse(req, 500, errBody);
     }
 
-    return sendJsonResponse(req, 200, body);
+    const esp_err_t result = sendJsonResponse(req, 200, body);
+    free(body);
+    return result;
 }
 
 }  // namespace

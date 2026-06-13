@@ -1,0 +1,2 @@
+dependencies:
+  espressif/esp-box-3: "^3.2.0"

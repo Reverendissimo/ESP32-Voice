@@ -87,10 +87,37 @@ bool ConfigValidator::validatePatch(const cJSON* patch, char* errorOut, size_t e
         }
     }
 
+    const cJSON* auth = cJSON_GetObjectItemCaseSensitive(patch, "auth");
+    if (auth != nullptr) {
+        if (!cJSON_IsObject(auth) || !isStringField(auth, "token")) {
+            setError(errorOut, errorOutLen, "Invalid auth patch");
+            return false;
+        }
+    }
+
+    const cJSON* vad = cJSON_GetObjectItemCaseSensitive(patch, "vad");
+    if (vad != nullptr) {
+        if (!cJSON_IsObject(vad) || !isNumberField(vad, "speechStartThreshold") ||
+            !isNumberField(vad, "silenceFinalizeMs")) {
+            setError(errorOut, errorOutLen, "Invalid vad patch");
+            return false;
+        }
+    }
+
     const cJSON* wifi = cJSON_GetObjectItemCaseSensitive(patch, "wifi");
     if (wifi != nullptr) {
         if (!cJSON_IsObject(wifi) || !isStringField(wifi, "ssid") || !isStringField(wifi, "password")) {
             setError(errorOut, errorOutLen, "Invalid wifi patch");
+            return false;
+        }
+    }
+
+    const cJSON* callbacks = cJSON_GetObjectItemCaseSensitive(patch, "callbacks");
+    if (callbacks != nullptr) {
+        if (!cJSON_IsObject(callbacks) || !isStringField(callbacks, "speechUrl") ||
+            !isStringField(callbacks, "speechFinalizeUrl") || !isStringField(callbacks, "uiEventUrl") ||
+            !isStringField(callbacks, "heartbeatUrl")) {
+            setError(errorOut, errorOutLen, "Invalid callbacks patch");
             return false;
         }
     }
@@ -100,6 +127,15 @@ bool ConfigValidator::validatePatch(const cJSON* patch, char* errorOut, size_t e
         if (!cJSON_IsObject(network) || !isStringField(network, "callbackBaseUrl") ||
             !isNumberField(network, "localHttpPort")) {
             setError(errorOut, errorOutLen, "Invalid network patch");
+            return false;
+        }
+    }
+
+    const cJSON* time = cJSON_GetObjectItemCaseSensitive(patch, "time");
+    if (time != nullptr) {
+        if (!cJSON_IsObject(time) || !isStringField(time, "timezone") || !isStringField(time, "sntpServer") ||
+            !isNumberField(time, "syncIntervalSec")) {
+            setError(errorOut, errorOutLen, "Invalid time patch");
             return false;
         }
     }

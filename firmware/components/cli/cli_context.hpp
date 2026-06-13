@@ -4,9 +4,15 @@
  */
 #pragma once
 
+class AudioCaptureService;
+class AudioUploadService;
+class Box3AudioBoard;
 class ConfigManager;
+class DisplayService;
 class HealthService;
 class TimeSyncService;
+class UtteranceStateMachine;
+class VadService;
 class WifiManager;
 
 /**
@@ -18,4 +24,12 @@ struct CliContext {
     WifiManager* wifiManager;
     TimeSyncService* timeSyncService;
     HealthService* healthService;
+    Box3AudioBoard* audioBoard;
+    AudioCaptureService* audioCapture;
+    AudioUploadService* audioUpload;
+    VadService* vadService;
+    UtteranceStateMachine* utteranceFsm;
+    DisplayService* displayService;
+    void (*reloadRuntimeConfig)(void* context);
+    void* runtimeReloadContext;
 };

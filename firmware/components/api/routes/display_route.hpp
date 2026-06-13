@@ -1,25 +1,22 @@
-        /**
-         * @file display_route.hpp
-         * @brief Handles POST /api/v1/display.
-         *
-         * Responsibilities:
- * - Handles POST /api/v1/display.
-         *
-         * Non-responsibilities:
- * - business logic in services
-         */
-        #pragma once
+/**
+ * @file display_route.hpp
+ * @brief Handles POST /api/v1/display.
+ */
+#pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
 
+#include "esp_http_server.h"
+
+struct ApiContext;
+
 /**
-         * @brief Handles POST /api/v1/display.
-         */
-        class DisplayRoute {
-        public:
-            /**
-     * @brief Registers Handles POST /api/v1/display.
-     */
-    bool registerRoute();
-        };
+ * @brief Registers and handles the display command route.
+ */
+class DisplayRoute {
+public:
+    bool registerRoutes(httpd_handle_t server, const ApiContext* context) const;
+
+private:
+    static esp_err_t handlePost(httpd_req_t* req);
+};

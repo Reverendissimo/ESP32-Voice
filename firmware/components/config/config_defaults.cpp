@@ -18,7 +18,7 @@ AppConfig makeDefaults() {
 
     defaults.presence.radarEnabled = true;
 
-    defaults.vad.speechStartThreshold = 30;
+    defaults.vad.speechStartThreshold = 25;
     defaults.vad.silenceFinalizeMs = 1200;
 
     defaults.audio.sampleRateHz = 16000;

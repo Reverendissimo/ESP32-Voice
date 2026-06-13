@@ -135,5 +135,7 @@ Index: [`04-documentation-index.md`](04-documentation-index.md)
 
 ## Status
 
-- **Step 3 done:** local REST server on port 80 — `/health`, `/status`, `/version`, `/config/*`
-- **Step 4 next:** USB serial CLI
+- **Step 4 done:** USB serial CLI over USB Serial/JTAG (`help`, `status`, `wifi_set`, `config_*`, …)
+- **Step 5 done:** audio path (capture, VAD, upload, playback)
+- **Step 6 done:** display path (screen model/parser, LVGL renderer, `POST /display`, ui-event client)
+- **Step 7 next:** sensor services (battery, environment, radar, alarms)

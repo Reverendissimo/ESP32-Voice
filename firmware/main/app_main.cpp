@@ -4,18 +4,29 @@
  */
 #include "app_bootstrap.hpp"
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char* kTag = "app_main";
 
 extern "C" void app_main(void) {
-    ESP_LOGI(kTag, "ESP32-Voice firmware starting");
+    const esp_app_desc_t* appDesc = esp_app_get_description();
+    ESP_LOGI(
+        kTag,
+        "ESP32-Voice starting version=%s",
+        appDesc != nullptr ? appDesc->version : "unknown");
 
-    AppBootstrap bootstrap;
+    static AppBootstrap bootstrap;
     if (!bootstrap.start()) {
-        ESP_LOGE(kTag, "Bootstrap failed");
-        return;
+        ESP_LOGE(kTag, "Bootstrap incomplete — serial CLI may still work; type help");
+    } else {
+        ESP_LOGI(kTag, "Bootstrap complete");
     }
 
-    ESP_LOGI(kTag, "Bootstrap complete");
+    // Never return: destroying bootstrap while FreeRTOS tasks run corrupts the heap.
+    while (true) {
+        vTaskDelay(portMAX_DELAY);
+    }
 }

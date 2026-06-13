@@ -46,6 +46,13 @@ void writeNetwork(const config::NetworkConfig& network, cJSON* root) {
     cJSON_AddNumberToObject(root, "localHttpPort", network.localHttpPort);
 }
 
+void writeCallbacks(const config::CallbacksConfig& callbacks, cJSON* root) {
+    cJSON_AddStringToObject(root, "speechUrl", callbacks.speechUrl);
+    cJSON_AddStringToObject(root, "speechFinalizeUrl", callbacks.speechFinalizeUrl);
+    cJSON_AddStringToObject(root, "uiEventUrl", callbacks.uiEventUrl);
+    cJSON_AddStringToObject(root, "heartbeatUrl", callbacks.heartbeatUrl);
+}
+
 void writeTime(const config::TimeConfig& time, cJSON* root) {
     cJSON_AddStringToObject(root, "timezone", time.timezone);
     cJSON_AddStringToObject(root, "sntpServer", time.sntpServer);
@@ -76,6 +83,26 @@ bool readWifi(const cJSON* root, config::WifiConfig& wifi) {
     }
     if (cJSON_IsString(password)) {
         copyString(wifi.password, sizeof(wifi.password), password->valuestring);
+    }
+    return true;
+}
+
+bool readCallbacks(const cJSON* root, config::CallbacksConfig& callbacks) {
+    const cJSON* speechUrl = cJSON_GetObjectItemCaseSensitive(root, "speechUrl");
+    const cJSON* speechFinalizeUrl = cJSON_GetObjectItemCaseSensitive(root, "speechFinalizeUrl");
+    const cJSON* uiEventUrl = cJSON_GetObjectItemCaseSensitive(root, "uiEventUrl");
+    const cJSON* heartbeatUrl = cJSON_GetObjectItemCaseSensitive(root, "heartbeatUrl");
+    if (cJSON_IsString(speechUrl)) {
+        copyString(callbacks.speechUrl, sizeof(callbacks.speechUrl), speechUrl->valuestring);
+    }
+    if (cJSON_IsString(speechFinalizeUrl)) {
+        copyString(callbacks.speechFinalizeUrl, sizeof(callbacks.speechFinalizeUrl), speechFinalizeUrl->valuestring);
+    }
+    if (cJSON_IsString(uiEventUrl)) {
+        copyString(callbacks.uiEventUrl, sizeof(callbacks.uiEventUrl), uiEventUrl->valuestring);
+    }
+    if (cJSON_IsString(heartbeatUrl)) {
+        copyString(callbacks.heartbeatUrl, sizeof(callbacks.heartbeatUrl), heartbeatUrl->valuestring);
     }
     return true;
 }
@@ -120,6 +147,7 @@ cJSON* configToJson(const config::AppConfig& config) {
     cJSON* auth = cJSON_AddObjectToObject(root, "auth");
     cJSON* wifi = cJSON_AddObjectToObject(root, "wifi");
     cJSON* network = cJSON_AddObjectToObject(root, "network");
+    cJSON* callbacks = cJSON_AddObjectToObject(root, "callbacks");
     cJSON* time = cJSON_AddObjectToObject(root, "time");
 
     if (identity != nullptr) {
@@ -133,6 +161,9 @@ cJSON* configToJson(const config::AppConfig& config) {
     }
     if (network != nullptr) {
         writeNetwork(config.network, network);
+    }
+    if (callbacks != nullptr) {
+        writeCallbacks(config.callbacks, callbacks);
     }
     if (time != nullptr) {
         writeTime(config.time, time);
@@ -161,6 +192,7 @@ bool jsonToConfig(const cJSON* root, config::AppConfig& config) {
     const cJSON* auth = cJSON_GetObjectItemCaseSensitive(root, "auth");
     const cJSON* wifi = cJSON_GetObjectItemCaseSensitive(root, "wifi");
     const cJSON* network = cJSON_GetObjectItemCaseSensitive(root, "network");
+    const cJSON* callbacks = cJSON_GetObjectItemCaseSensitive(root, "callbacks");
     const cJSON* time = cJSON_GetObjectItemCaseSensitive(root, "time");
     const cJSON* vad = cJSON_GetObjectItemCaseSensitive(root, "vad");
 
@@ -175,6 +207,9 @@ bool jsonToConfig(const cJSON* root, config::AppConfig& config) {
     }
     if (cJSON_IsObject(network)) {
         readNetwork(network, config.network);
+    }
+    if (cJSON_IsObject(callbacks)) {
+        readCallbacks(callbacks, config.callbacks);
     }
     if (cJSON_IsObject(time)) {
         readTime(time, config.time);

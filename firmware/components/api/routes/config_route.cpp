@@ -58,15 +58,26 @@ bool requireAuth(httpd_req_t* req, const ApiContext* context, char* requestId, s
 }
 
 esp_err_t sendConfig(httpd_req_t* req, const ApiContext* context, const config::AppConfig& config, bool dirty) {
+    char* body = static_cast<char*>(malloc(kResponseBufferSize));
+    if (body == nullptr) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INTERNAL_ERROR", "Out of memory", false, "", errBody, sizeof(errBody));
+        return sendJsonResponse(req, 500, errBody);
+    }
+
     JsonResponseBuilder builder;
-    char body[kResponseBufferSize] = {};
-    if (!builder.buildConfig(context->deviceUid, config, dirty, true, body, sizeof(body))) {
+    if (!builder.buildConfig(context->deviceUid, config, dirty, true, body, kResponseBufferSize)) {
+        free(body);
         ErrorResponseFactory errors;
         char errBody[256] = {};
         errors.build("INTERNAL_ERROR", "Failed to build config response", false, "", errBody, sizeof(errBody));
         return sendJsonResponse(req, 500, errBody);
     }
-    return sendJsonResponse(req, 200, body);
+
+    const esp_err_t result = sendJsonResponse(req, 200, body);
+    free(body);
+    return result;
 }
 
 esp_err_t sendOk(httpd_req_t* req, const char* requestId, const char* message) {
@@ -183,7 +194,11 @@ esp_err_t ConfigRoute::handlePatch(httpd_req_t* req) {
         return ESP_OK;
     }
 
-    return sendConfig(req, context, context->configManager->active(), context->configManager->isDirty());
+    if (context->reloadRuntimeConfig != nullptr) {
+        context->reloadRuntimeConfig(context->runtimeReloadContext);
+    }
+
+    return sendOk(req, requestId, "patched");
 }
 
 esp_err_t ConfigRoute::handleApply(httpd_req_t* req) {
@@ -212,7 +227,11 @@ esp_err_t ConfigRoute::handleApply(httpd_req_t* req) {
         return sendJsonResponse(req, 500, errBody);
     }
 
-    return sendConfig(req, context, context->configManager->active(), context->configManager->isDirty());
+    if (context->reloadRuntimeConfig != nullptr) {
+        context->reloadRuntimeConfig(context->runtimeReloadContext);
+    }
+
+    return sendOk(req, requestId, "applied");
 }
 
 esp_err_t ConfigRoute::handleSave(httpd_req_t* req) {
@@ -233,6 +252,10 @@ esp_err_t ConfigRoute::handleSave(httpd_req_t* req) {
         char errBody[256] = {};
         errors.build("SAVE_FAILED", "Failed to save active config", false, requestId, errBody, sizeof(errBody));
         return sendJsonResponse(req, 500, errBody);
+    }
+
+    if (context->reloadRuntimeConfig != nullptr) {
+        context->reloadRuntimeConfig(context->runtimeReloadContext);
     }
 
     return sendOk(req, requestId, "saved");
@@ -258,6 +281,10 @@ esp_err_t ConfigRoute::handleLoad(httpd_req_t* req) {
         return sendJsonResponse(req, 400, errBody);
     }
 
+    if (context->reloadRuntimeConfig != nullptr) {
+        context->reloadRuntimeConfig(context->runtimeReloadContext);
+    }
+
     return sendConfig(req, context, context->configManager->active(), context->configManager->isDirty());
 }
 
@@ -275,6 +302,9 @@ esp_err_t ConfigRoute::handleRevert(httpd_req_t* req) {
     }
 
     context->configManager->revertActive();
+    if (context->reloadRuntimeConfig != nullptr) {
+        context->reloadRuntimeConfig(context->runtimeReloadContext);
+    }
     return sendConfig(req, context, context->configManager->active(), context->configManager->isDirty());
 }
 

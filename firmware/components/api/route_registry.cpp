@@ -8,6 +8,8 @@
 #include "http_response_helpers.hpp"
 #include "routes/config_route.hpp"
 #include "routes/health_route.hpp"
+#include "routes/display_route.hpp"
+#include "routes/play_route.hpp"
 #include "routes/version_route.hpp"
 
 namespace {
@@ -39,15 +41,16 @@ bool RouteRegistry::registerAll(httpd_handle_t server, const ApiContext* context
     HealthRoute healthRoute;
     VersionRoute versionRoute;
     ConfigRoute configRoute;
+    PlayRoute playRoute;
+    DisplayRoute displayRoute;
 
     if (!healthRoute.registerRoutes(server, context) || !versionRoute.registerRoutes(server, context) ||
-        !configRoute.registerRoutes(server, context)) {
+        !configRoute.registerRoutes(server, context) || !playRoute.registerRoutes(server, context) ||
+        !displayRoute.registerRoutes(server, context)) {
         return false;
     }
 
     const char* postStubs[] = {
-        "/api/v1/play",
-        "/api/v1/display",
         "/api/v1/time/sync",
         "/api/v1/wifi/test",
         "/api/v1/ir/learn/start",

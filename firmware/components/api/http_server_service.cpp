@@ -4,6 +4,8 @@
  */
 #include "http_server_service.hpp"
 
+#include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "route_registry.hpp"
 
@@ -21,9 +23,18 @@ bool HttpServerService::start(uint16_t port, const ApiContext* context) {
     config.server_port = port;
     config.max_uri_handlers = 32;
     config.lru_purge_enable = true;
+    // Default 4KB httpd stack overflows on config/health JSON and /play body parsing.
+    config.stack_size = 6144;
+    config.core_id = 0;
+    config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
-    if (httpd_start(&m_server, &config) != ESP_OK) {
-        ESP_LOGE(kTag, "Failed to start HTTP server");
+    const esp_err_t err = httpd_start(&m_server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            kTag,
+            "Failed to start HTTP server: %s heap_int=%lu",
+            esp_err_to_name(err),
+            static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
         m_server = nullptr;
         return false;
     }

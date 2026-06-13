@@ -99,6 +99,30 @@ bool ConfigManager::applyPatchObject(const cJSON* patch, char* errorOut, size_t 
         }
     }
 
+    const cJSON* callbacks = cJSON_GetObjectItemCaseSensitive(patch, "callbacks");
+    if (cJSON_IsObject(callbacks)) {
+        const cJSON* speechUrl = cJSON_GetObjectItemCaseSensitive(callbacks, "speechUrl");
+        const cJSON* speechFinalizeUrl = cJSON_GetObjectItemCaseSensitive(callbacks, "speechFinalizeUrl");
+        const cJSON* uiEventUrl = cJSON_GetObjectItemCaseSensitive(callbacks, "uiEventUrl");
+        const cJSON* heartbeatUrl = cJSON_GetObjectItemCaseSensitive(callbacks, "heartbeatUrl");
+        if (cJSON_IsString(speechUrl)) {
+            copyString(candidate.callbacks.speechUrl, sizeof(candidate.callbacks.speechUrl), speechUrl->valuestring);
+        }
+        if (cJSON_IsString(speechFinalizeUrl)) {
+            copyString(
+                candidate.callbacks.speechFinalizeUrl,
+                sizeof(candidate.callbacks.speechFinalizeUrl),
+                speechFinalizeUrl->valuestring);
+        }
+        if (cJSON_IsString(uiEventUrl)) {
+            copyString(candidate.callbacks.uiEventUrl, sizeof(candidate.callbacks.uiEventUrl), uiEventUrl->valuestring);
+        }
+        if (cJSON_IsString(heartbeatUrl)) {
+            copyString(
+                candidate.callbacks.heartbeatUrl, sizeof(candidate.callbacks.heartbeatUrl), heartbeatUrl->valuestring);
+        }
+    }
+
     const cJSON* network = cJSON_GetObjectItemCaseSensitive(patch, "network");
     if (cJSON_IsObject(network)) {
         const cJSON* callbackBaseUrl = cJSON_GetObjectItemCaseSensitive(network, "callbackBaseUrl");
@@ -123,6 +147,22 @@ bool ConfigManager::applyPatchObject(const cJSON* patch, char* errorOut, size_t 
         }
         if (cJSON_IsNumber(silenceFinalizeMs)) {
             candidate.vad.silenceFinalizeMs = static_cast<uint16_t>(silenceFinalizeMs->valuedouble);
+        }
+    }
+
+    const cJSON* time = cJSON_GetObjectItemCaseSensitive(patch, "time");
+    if (cJSON_IsObject(time)) {
+        const cJSON* timezone = cJSON_GetObjectItemCaseSensitive(time, "timezone");
+        const cJSON* sntpServer = cJSON_GetObjectItemCaseSensitive(time, "sntpServer");
+        const cJSON* syncIntervalSec = cJSON_GetObjectItemCaseSensitive(time, "syncIntervalSec");
+        if (cJSON_IsString(timezone)) {
+            copyString(candidate.time.timezone, sizeof(candidate.time.timezone), timezone->valuestring);
+        }
+        if (cJSON_IsString(sntpServer)) {
+            copyString(candidate.time.sntpServer, sizeof(candidate.time.sntpServer), sntpServer->valuestring);
+        }
+        if (cJSON_IsNumber(syncIntervalSec)) {
+            candidate.time.syncIntervalSec = static_cast<uint32_t>(syncIntervalSec->valuedouble);
         }
     }
 

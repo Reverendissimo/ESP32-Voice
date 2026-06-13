@@ -5,5 +5,5 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
-        console config network diagnostics json
+        audio display console config network diagnostics json esp_app_format
 )

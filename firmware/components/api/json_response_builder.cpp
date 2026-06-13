@@ -20,6 +20,7 @@ void addConfigObject(cJSON* configObject, const config::AppConfig& config, bool 
     cJSON* auth = cJSON_AddObjectToObject(configObject, "auth");
     cJSON* wifi = cJSON_AddObjectToObject(configObject, "wifi");
     cJSON* network = cJSON_AddObjectToObject(configObject, "network");
+    cJSON* callbacks = cJSON_AddObjectToObject(configObject, "callbacks");
     cJSON* vad = cJSON_AddObjectToObject(configObject, "vad");
     cJSON* time = cJSON_AddObjectToObject(configObject, "time");
 
@@ -42,6 +43,12 @@ void addConfigObject(cJSON* configObject, const config::AppConfig& config, bool 
     if (network != nullptr) {
         cJSON_AddStringToObject(network, "callbackBaseUrl", config.network.callbackBaseUrl);
         cJSON_AddNumberToObject(network, "localHttpPort", config.network.localHttpPort);
+    }
+    if (callbacks != nullptr) {
+        cJSON_AddStringToObject(callbacks, "speechUrl", config.callbacks.speechUrl);
+        cJSON_AddStringToObject(callbacks, "speechFinalizeUrl", config.callbacks.speechFinalizeUrl);
+        cJSON_AddStringToObject(callbacks, "uiEventUrl", config.callbacks.uiEventUrl);
+        cJSON_AddStringToObject(callbacks, "heartbeatUrl", config.callbacks.heartbeatUrl);
     }
     if (vad != nullptr) {
         cJSON_AddNumberToObject(vad, "speechStartThreshold", config.vad.speechStartThreshold);

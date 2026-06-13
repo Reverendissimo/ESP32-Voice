@@ -1,0 +1,38 @@
+/**
+ * @file audio_types.hpp
+ * @brief Shared audio constants and frame structures.
+ */
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+namespace audio {
+
+constexpr uint16_t kDefaultSampleRateHz = 16000;
+constexpr uint8_t kDefaultChannels = 1;
+constexpr uint16_t kFrameDurationMs = 20;
+constexpr size_t kSamplesPerFrame = (kDefaultSampleRateHz * kFrameDurationMs) / 1000;
+constexpr size_t kBytesPerFrame = kSamplesPerFrame * sizeof(int16_t);
+
+constexpr size_t kUploadQueueDepth = 16;
+constexpr size_t kPlaybackQueueDepth = 2;
+// One queued item must fit in FreeRTOS queue storage (internal RAM). 64 KiB × depth OOMs at boot.
+constexpr size_t kMaxPlaybackBytes = 8 * 1024;
+
+struct PcmFrame {
+    int16_t samples[kSamplesPerFrame];
+};
+
+enum class VadEventType : uint8_t {
+    Silence,
+    SpeechStart,
+    SpeechActive,
+    SpeechEnd,
+};
+
+struct VadEvent {
+    VadEventType type;
+};
+
+}  // namespace audio

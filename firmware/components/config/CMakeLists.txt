@@ -4,6 +4,7 @@
 "config_validator.cpp"
 "config_store.cpp"
 "config_manager.cpp"
+        "config_callbacks.cpp"
         INCLUDE_DIRS
 "."
         REQUIRES nvs_flash json

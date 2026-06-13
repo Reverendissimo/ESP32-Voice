@@ -45,3 +45,6 @@ firmware/*.map
 # Flash / debug logs
 *.log
 sdkconfig.ci
+
+# Local flash bundles (copy to host manually)
+dist/

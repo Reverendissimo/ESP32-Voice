@@ -11,7 +11,9 @@
  */
 #pragma once
 
+class AudioPlaybackService;
 class AuthContext;
+class DisplayService;
 class ConfigManager;
 class HealthService;
 class TimeSyncService;
@@ -27,4 +29,8 @@ struct ApiContext {
     TimeSyncService* timeSyncService;
     HealthService* healthService;
     AuthContext* authContext;
+    AudioPlaybackService* audioPlayback;
+    DisplayService* displayService;
+    void (*reloadRuntimeConfig)(void* context);
+    void* runtimeReloadContext;
 };

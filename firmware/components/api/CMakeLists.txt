@@ -18,5 +18,5 @@ idf_component_register(
         "."
         "routes"
     REQUIRES
-        esp_http_server json config network diagnostics esp_app_format
+        esp_http_server json config network diagnostics esp_app_format audio display mbedtls
 )
