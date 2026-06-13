@@ -35,15 +35,24 @@ public:
         AudioCaptureService* capture = nullptr);
     bool start();
     bool enqueuePcm(const int16_t* samples, size_t sampleCount, uint16_t sampleRateHz, uint8_t channels);
+    bool enqueueDecodedPcm(
+        int16_t* samples,
+        size_t sampleCount,
+        uint16_t sampleRateHz,
+        uint8_t channels,
+        bool streamEnd = false);
+    void endStream();
     bool isRunning() const;
     bool isBusy() const;
+    size_t ringUsedBytes() const;
+    size_t ringFreeBytes() const;
+    size_t ringCapacityBytes() const;
     void setVolumePercent(uint8_t percent);
     uint8_t volumePercent() const;
 
 private:
     static void playbackTask(void* arg);
     void runPlaybackLoop();
-    size_t ringUsedBytes() const;
     bool writeRing(const uint8_t* data, size_t byteLen, TickType_t timeoutTicks);
     size_t readRing(uint8_t* out, size_t maxBytes);
     void drainSpeaker(esp_codec_dev_handle_t speaker);
@@ -55,6 +64,7 @@ private:
     uint8_t m_defaultChannels = audio::kDefaultChannels;
     bool m_running = false;
     bool m_playing = false;
+    bool m_expectMoreChunks = false;
     void* m_taskHandle = nullptr;
     uint8_t* m_ring = nullptr;
     size_t m_ringCapacity = 0;

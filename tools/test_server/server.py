@@ -15,10 +15,12 @@ On finalize, runs a final faster-whisper pass and prints:
 During upload, partial results print as audio arrives:
   [asr+] utt_N (en, 0.3s): new words...
 
-After ASR finalize, Chatterbox TTS synthesizes a reply and plays it on the ESP:
+After ASR finalize, transcript is sent to Hermes agent, then Chatterbox TTS plays the reply on the ESP:
+  [hermes] utt_N: assistant reply
   [tts] utt_N: 2.10s -> espbox-... @ 192.168.100.217
 
 Optional: --echo-on to play the raw recording back (off by default).
+Optional: --no-hermes to skip LLM and speak the transcript directly.
 Optional: --no-tts to disable Chatterbox synthesis.
 """
 
@@ -28,9 +30,11 @@ import argparse
 import base64
 import binascii
 import json
+import re
 import sys
 import threading
 import time
+import traceback
 import wave
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,6 +48,9 @@ try:
 except ImportError:
     requests = None  # type: ignore
 
+from esp_playback import stream_pcm_to_esp
+from hermes_client import HermesClient, HermesError, build_hermes_from_args
+from hermes_session import DEFAULT_SESSION_FILE, resolve_active_session
 from ml_runtime import configure_ml_runtime
 from transcriber import WhisperTranscriber, build_transcriber_from_args
 from tts_engine import ChatterboxTtsEngine, build_tts_from_args
@@ -254,71 +261,129 @@ def echo_playback(
     channels: int,
     auth_token: str,
     *,
-    chunk_bytes: int = 10 * 1024,
+    chunk_bytes: int = 8192,
+    stream_end: bool = True,
 ) -> bool:
-    if requests is None:
-        print("[echo] requests not installed; skip playback", flush=True)
-        return False
+    return stream_pcm_to_esp(
+        device_ip,
+        device_uid,
+        pcm,
+        sample_rate_hz,
+        channels,
+        auth_token,
+        chunk_bytes=chunk_bytes,
+        stream_end=stream_end,
+        log_prefix="[echo]",
+    )
 
-    url = f"http://{device_ip}/api/v1/play"
-    headers = {"Content-Type": "application/json"}
-    if auth_token:
-        headers["X-Auth-Token"] = auth_token
 
-    if chunk_bytes <= 0:
-        chunk_bytes = 10 * 1024
-    chunk_bytes = chunk_bytes - (chunk_bytes % 2)
-
-    total = len(pcm)
-    sent = 0
-    chunk_idx = 0
-    ok = True
-    while sent < total:
-        piece = pcm[sent : sent + chunk_bytes]
-        body = {
-            "v": 1,
-            "target_device_uid": device_uid,
-            "request_id": f"test_server_echo_{chunk_idx}",
-            "command_id": f"echo_{chunk_idx}",
-            "sample_rate_hz": sample_rate_hz,
-            "channels": channels,
-            "pcm_b64": base64.b64encode(piece).decode("ascii"),
-        }
-
-        posted = False
-        for attempt in range(6):
-            try:
-                resp = requests.post(url, json=body, headers=headers, timeout=20)
-                if resp.status_code == 200:
-                    posted = True
-                    print(
-                        f"[echo] chunk {chunk_idx} ok ({len(piece)} bytes, "
-                        f"{sent + len(piece)}/{total})",
-                        flush=True,
-                    )
-                    break
-                if resp.status_code == 503:
-                    time.sleep(0.15)
-                    continue
-                ok = False
-                print(
-                    f"[echo] chunk {chunk_idx} POST /play -> {resp.status_code} "
-                    f"({len(piece)} bytes)",
-                    flush=True,
-                )
-                break
-            except requests.RequestException as exc:
-                ok = False
-                print(f"[echo] chunk {chunk_idx} failed: {exc}", flush=True)
-                break
-
-        if not posted:
-            ok = False
+def _split_pending_sentences(pending: str) -> tuple[list[str], str]:
+    sentences: list[str] = []
+    rest = pending
+    while True:
+        match = re.search(r"[.!?](?:\s+|$)", rest)
+        if not match:
             break
+        sentence = rest[: match.end()].strip()
+        rest = rest[match.end() :]
+        if len(sentence) >= 3:
+            sentences.append(sentence)
+    return sentences, rest
 
-        sent += len(piece)
-        chunk_idx += 1
-    return ok
+
+def hermes_failure_reply(kind: str) -> str:
+    if kind == "timeout":
+        return "Sorry, the assistant is taking too long. Please try again."
+    if kind == "http":
+        return "Sorry, the assistant had a problem. Please try again."
+    return "Sorry, I could not reach the assistant right now."
+
+
+def handle_voice_reply(
+    cfg: "ServerConfig",
+    utterance_id: str,
+    user_text: str,
+    *,
+    device_uid: str,
+    device_ip: str,
+    session_id: str = "",
+) -> None:
+    reply = user_text
+    if cfg.hermes is not None:
+        pending = ""
+        tts_started = False
+
+        def on_delta(delta: str) -> None:
+            nonlocal pending, tts_started
+            pending += delta
+            sentences, pending = _split_pending_sentences(pending)
+            for sentence in sentences:
+                print(f"[hermes+] {utterance_id}: {sentence}", flush=True)
+                if cfg.tts is not None:
+                    tts_started = True
+                    cfg.tts.speak_async(
+                        utterance_id,
+                        sentence,
+                        device_uid=device_uid,
+                        device_ip=device_ip,
+                        auth_token=cfg.echo_auth_token,
+                        stream_end=False,
+                    )
+
+        try:
+            reply = cfg.hermes.chat(
+                user_text,
+                conversation_id=cfg.hermes_conversation_id,
+                on_delta=on_delta,
+            )
+            if reply:
+                print(f"[hermes] {utterance_id}: {reply}", flush=True)
+            else:
+                print(f"[hermes] {utterance_id}: (empty reply)", flush=True)
+                reply = user_text
+        except HermesError as exc:
+            print(f"[hermes] {utterance_id}: {exc.kind}: {exc}", flush=True)
+            reply = hermes_failure_reply(exc.kind)
+        except Exception as exc:
+            print(f"[hermes] {utterance_id}: unexpected error: {exc}", flush=True)
+            traceback.print_exc()
+            reply = hermes_failure_reply("unknown")
+        else:
+            remainder = pending.strip()
+            if remainder and cfg.tts is not None:
+                tts_started = True
+                cfg.tts.speak_async(
+                    utterance_id,
+                    remainder,
+                    device_uid=device_uid,
+                    device_ip=device_ip,
+                    auth_token=cfg.echo_auth_token,
+                    stream_end=True,
+                )
+            elif tts_started and cfg.tts is not None:
+                stream_pcm_to_esp(
+                    device_ip,
+                    device_uid,
+                    b"",
+                    16000,
+                    1,
+                    cfg.echo_auth_token,
+                    stream_end=True,
+                    log_prefix="[tts]",
+                )
+            return
+
+    if cfg.tts is None or not reply:
+        return
+
+    cfg.tts.speak_async(
+        utterance_id,
+        reply,
+        device_uid=device_uid,
+        device_ip=device_ip,
+        auth_token=cfg.echo_auth_token,
+        stream_end=True,
+    )
 
 
 class ServerConfig:
@@ -327,8 +392,11 @@ class ServerConfig:
     echo_enabled: bool = False
     echo_device_ip: str = ""
     echo_auth_token: str = ""
+    play_chunk_bytes: int = 8192
     transcriber: WhisperTranscriber | None = None
     tts: ChatterboxTtsEngine | None = None
+    hermes: HermesClient | None = None
+    hermes_conversation_id: str = ""
     reply_ctx: dict[str, dict[str, str]]
 
 
@@ -571,6 +639,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.cfg.reply_ctx[utterance_id] = {
                     "device_uid": device_uid,
                     "device_ip": self.cfg.echo_device_ip or self.client_address[0],
+                    "session_id": str(result.get("session_id", "")),
                 }
 
             if self.cfg.echo_enabled and device_uid:
@@ -585,6 +654,7 @@ class Handler(BaseHTTPRequestHandler):
                         int(result["sample_rate_hz"]),
                         int(result["channels"]),
                         self.cfg.echo_auth_token,
+                        chunk_bytes=self.cfg.play_chunk_bytes,
                     )
 
             if self.cfg.transcriber is not None and result.get("utterance_id"):
@@ -674,6 +744,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--echo-auth-token", default="", help="X-Auth-Token for echo /play")
     parser.add_argument(
+        "--play-chunk-bytes",
+        type=int,
+        default=8192,
+        help="PCM bytes per /play POST (default: 8192, ~256 ms @ 16 kHz)",
+    )
+    parser.add_argument(
+        "--no-hermes-stream",
+        action="store_true",
+        help="Wait for full Hermes reply instead of streaming sentence TTS",
+    )
+    parser.add_argument(
         "--no-whisper",
         action="store_true",
         help="Disable faster-whisper transcription on finalize",
@@ -723,9 +804,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tts-model",
-        default="english",
+        default="turbo",
         choices=("english", "turbo", "multilingual"),
-        help="Chatterbox model (default: english)",
+        help="Chatterbox model (default: turbo; paralinguistic tags need turbo)",
     )
     parser.add_argument(
         "--tts-device",
@@ -754,6 +835,82 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Hugging Face token (or set HF_TOKEN env var)",
     )
+    parser.add_argument(
+        "--no-hermes",
+        action="store_true",
+        help="Skip Hermes LLM; speak ASR transcript directly",
+    )
+    parser.add_argument(
+        "--hermes-host",
+        default="192.168.100.25",
+        help="Hermes agent host (default: 192.168.100.25)",
+    )
+    parser.add_argument(
+        "--hermes-port",
+        type=int,
+        default=8642,
+        help="Hermes agent port (default: 8642)",
+    )
+    parser.add_argument(
+        "--hermes-api-key",
+        default="",
+        help="Hermes bearer token (or set HERMES_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--hermes-model",
+        default="hermes-agent",
+        help="Hermes model name (default: hermes-agent)",
+    )
+    parser.add_argument(
+        "--hermes-conversation-prefix",
+        default="voice-box",
+        help="Hermes conversation id prefix (default: voice-box -> voice-box-<device_uid>)",
+    )
+    parser.add_argument(
+        "--hermes-voice-instructions",
+        default="",
+        help="Voice-mode instructions sent only on first message per conversation",
+    )
+    parser.add_argument(
+        "--hermes-system-prompt",
+        default="",
+        help="Deprecated alias for --hermes-voice-instructions",
+    )
+    parser.add_argument(
+        "--hermes-timeout-s",
+        type=float,
+        default=300.0,
+        help="Hermes read timeout in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--hermes-connect-timeout-s",
+        type=float,
+        default=10.0,
+        help="Hermes connect timeout in seconds (default: 10)",
+    )
+    parser.add_argument(
+        "--hermes-max-retries",
+        type=int,
+        default=1,
+        help="Retry Hermes once on connection drops (default: 1)",
+    )
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument(
+        "--new-session",
+        action="store_true",
+        help="Create a new Hermes conversation id, save it, and use it",
+    )
+    session_group.add_argument(
+        "--session",
+        metavar="SESSIONID",
+        default=None,
+        help="Restore a saved Hermes conversation id and make it active",
+    )
+    parser.add_argument(
+        "--hermes-session-file",
+        default="",
+        help=f"Path to active Hermes session file (default: {DEFAULT_SESSION_FILE})",
+    )
     return parser.parse_args()
 
 
@@ -769,21 +926,66 @@ def main() -> int:
     cfg.echo_enabled = args.echo_on
     cfg.echo_device_ip = args.echo_device_ip
     cfg.echo_auth_token = args.echo_auth_token
+    cfg.play_chunk_bytes = max(2, args.play_chunk_bytes - (args.play_chunk_bytes % 2))
     cfg.reply_ctx = {}
-    cfg.tts = build_tts_from_args(args, playback_fn=echo_playback)
+
+    def tts_playback(
+        device_ip: str,
+        device_uid: str,
+        pcm: bytes,
+        sample_rate_hz: int,
+        channels: int,
+        auth_token: str,
+        *,
+        stream_end: bool = True,
+    ) -> bool:
+        return stream_pcm_to_esp(
+            device_ip,
+            device_uid,
+            pcm,
+            sample_rate_hz,
+            channels,
+            auth_token,
+            chunk_bytes=cfg.play_chunk_bytes,
+            stream_end=stream_end,
+            log_prefix="[tts]",
+        )
+
+    cfg.tts = build_tts_from_args(args, playback_fn=tts_playback)
+    cfg.hermes = build_hermes_from_args(args)
+
+    hermes_session_file = Path(args.hermes_session_file) if args.hermes_session_file else DEFAULT_SESSION_FILE
+    hermes_session_mode = ""
+    if cfg.hermes is not None:
+        try:
+            cfg.hermes_conversation_id, hermes_session_mode = resolve_active_session(
+                path=hermes_session_file,
+                prefix=args.hermes_conversation_prefix,
+                new_session=args.new_session,
+                session_id=args.session,
+            )
+        except ValueError as exc:
+            print(f"Hermes session error: {exc}", flush=True)
+            return 2
+        if hermes_session_mode in {"restored", "continued"}:
+            cfg.hermes.mark_conversation_introduced(cfg.hermes_conversation_id)
 
     def on_asr_final(utterance_id: str, text: str) -> None:
         ctx = cfg.reply_ctx.pop(utterance_id, None)
-        if cfg.tts is None or ctx is None:
+        if ctx is None:
             return
-        reply = text
-        cfg.tts.speak_async(
-            utterance_id,
-            reply,
-            device_uid=ctx["device_uid"],
-            device_ip=ctx["device_ip"],
-            auth_token=cfg.echo_auth_token,
-        )
+
+        def run() -> None:
+            handle_voice_reply(
+                cfg,
+                utterance_id,
+                text,
+                device_uid=ctx["device_uid"],
+                device_ip=ctx["device_ip"],
+                session_id=ctx.get("session_id", ""),
+            )
+
+        threading.Thread(target=run, name=f"reply-{utterance_id}", daemon=True).start()
 
     cfg.transcriber = build_transcriber_from_args(args, on_final=on_asr_final)
 
@@ -824,6 +1026,16 @@ def main() -> int:
         )
     else:
         print("ASR -> disabled", flush=True)
+    if cfg.hermes is not None:
+        print(
+            f"Hermes -> {cfg.hermes.endpoint} model={cfg.hermes.model} "
+            f"conversation={cfg.hermes_conversation_id} ({hermes_session_mode}) "
+            f"session_file={hermes_session_file} "
+            f"read_timeout={cfg.hermes.read_timeout_s:.0f}s retries={cfg.hermes._max_retries}",
+            flush=True,
+        )
+    else:
+        print("Hermes -> disabled", flush=True)
     if cfg.tts is not None:
         print(
             f"TTS -> chatterbox model={args.tts_model} device={args.tts_device} "

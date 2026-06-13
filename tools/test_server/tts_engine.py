@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 import traceback
@@ -28,9 +29,34 @@ except ImportError:
     torch = None  # type: ignore[assignment]
 
 ChatterboxModel = Literal["english", "turbo", "multilingual"]
-PlaybackFn = Callable[[str, str, bytes, int, int, str], bool]
+PlaybackFn = Callable[..., bool]
 DEFAULT_VOICE_WAV = Path(__file__).resolve().parent / "voices" / "karla.wav"
 FALLBACK_VOICE_WAV = Path(__file__).resolve().parent / "voices" / "default_female.wav"
+
+# Chatterbox Turbo only — other models speak these as literal words.
+PARALINGUISTIC_TAGS = (
+    "[clear throat]",
+    "[chuckle]",
+    "[cough]",
+    "[gasp]",
+    "[groan]",
+    "[laugh]",
+    "[shush]",
+    "[sigh]",
+    "[sniff]",
+)
+_PARALINGUISTIC_TAG_RE = re.compile(
+    r"\[(?:"
+    + "|".join(re.escape(tag.strip("[]")) for tag in PARALINGUISTIC_TAGS)
+    + r")\]",
+    re.IGNORECASE,
+)
+
+
+def strip_paralinguistic_tags(text: str) -> str:
+    """Remove Turbo-only tags so non-turbo models do not say 'laugh' aloud."""
+    cleaned = _PARALINGUISTIC_TAG_RE.sub("", text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
 @dataclass(frozen=True)
@@ -41,10 +67,19 @@ class _TtsJob:
     device_ip: str
     prompt_wav_path: str | None
     auth_token: str
+    stream_end: bool = True
+
+
+@dataclass(frozen=True)
+class _SynthResult:
+    job: _TtsJob
+    pcm: bytes
+    sample_rate_hz: int
+    channels: int
 
 
 class ChatterboxTtsEngine:
-    """Synthesize speech in a worker thread and POST PCM to the ESP /play API."""
+    """Synthesize and play speech with pipelined synth + playback worker threads."""
 
     def __init__(
         self,
@@ -67,8 +102,14 @@ class ChatterboxTtsEngine:
         self._voice_wav_path = self._validate_voice_wav(voice_wav_path)
         self._model = None
         self._model_lock = threading.Lock()
-        self._queue: queue.Queue[_TtsJob | None] = queue.Queue()
-        self._worker = threading.Thread(target=self._run, name="chatterbox-tts", daemon=True)
+        self._job_queue: queue.Queue[_TtsJob | None] = queue.Queue()
+        self._ready_queue: queue.Queue[_SynthResult | None] = queue.Queue()
+        self._synth_worker = threading.Thread(
+            target=self._synth_loop, name="chatterbox-tts-synth", daemon=True
+        )
+        self._play_worker = threading.Thread(
+            target=self._play_loop, name="chatterbox-tts-play", daemon=True
+        )
         self._started = False
 
     @property
@@ -85,13 +126,15 @@ class ChatterboxTtsEngine:
         if self._started:
             return
         self._started = True
-        self._worker.start()
+        self._synth_worker.start()
+        self._play_worker.start()
 
     def stop(self) -> None:
         if not self._started:
             return
-        self._queue.put(None)
-        self._worker.join(timeout=120)
+        self._job_queue.put(None)
+        self._synth_worker.join(timeout=120)
+        self._play_worker.join(timeout=120)
         self._started = False
 
     def preload(self) -> None:
@@ -106,13 +149,14 @@ class ChatterboxTtsEngine:
         device_ip: str,
         prompt_wav_path: str | None = None,
         auth_token: str = "",
+        stream_end: bool = True,
     ) -> None:
         cleaned = text.strip()
         if not cleaned or not device_uid or not device_ip:
             return
         if not self._started:
             self.start()
-        self._queue.put(
+        self._job_queue.put(
             _TtsJob(
                 utterance_id=utterance_id,
                 text=cleaned,
@@ -120,6 +164,7 @@ class ChatterboxTtsEngine:
                 device_ip=device_ip,
                 prompt_wav_path=prompt_wav_path,
                 auth_token=auth_token,
+                stream_end=stream_end,
             )
         )
 
@@ -207,6 +252,10 @@ class ChatterboxTtsEngine:
     def _synthesize_wav(self, text: str, *, prompt_wav_path: str | None) -> tuple[object, int]:
         model = self._ensure_model()
         prompt = self._resolve_prompt(prompt_wav_path)
+        if self._model_name != "turbo":
+            text = strip_paralinguistic_tags(text)
+            if not text:
+                raise ValueError("empty text after removing paralinguistic tags")
         t0 = time.time()
 
         if self._model_name == "multilingual":
@@ -238,44 +287,67 @@ class ChatterboxTtsEngine:
         pcm16 = (audio * 32767.0).astype(np.int16)
         return pcm16.tobytes(), target_sr, 1
 
-    def _process_job(self, job: _TtsJob) -> None:
-        try:
-            pcm, sample_rate_hz, channels = self.synthesize_pcm(
-                job.text,
-                prompt_wav_path=job.prompt_wav_path,
-            )
-            duration_s = len(pcm) / (sample_rate_hz * channels * 2)
-            print(
-                f"[tts] {job.utterance_id}: {duration_s:.2f}s -> "
-                f"{job.device_uid} @ {job.device_ip}",
-                flush=True,
-            )
-            if self._playback_fn is None:
-                print(f"[tts] {job.utterance_id}: playback disabled (no handler)", flush=True)
-                return
-            ok = self._playback_fn(
-                job.device_ip,
-                job.device_uid,
-                pcm,
-                sample_rate_hz,
-                channels,
-                job.auth_token,
-            )
-            if not ok:
-                print(f"[tts] {job.utterance_id}: playback failed", flush=True)
-        except Exception:
-            print(f"[tts] {job.utterance_id}: synthesis failed", flush=True)
-            traceback.print_exc()
-
-    def _run(self) -> None:
+    def _synth_loop(self) -> None:
         while True:
-            item = self._queue.get()
+            job = self._job_queue.get()
+            try:
+                if job is None:
+                    self._ready_queue.put(None)
+                    return
+                try:
+                    pcm, sample_rate_hz, channels = self.synthesize_pcm(
+                        job.text,
+                        prompt_wav_path=job.prompt_wav_path,
+                    )
+                    self._ready_queue.put(
+                        _SynthResult(
+                            job=job,
+                            pcm=pcm,
+                            sample_rate_hz=sample_rate_hz,
+                            channels=channels,
+                        )
+                    )
+                except Exception:
+                    print(f"[tts] {job.utterance_id}: synthesis failed", flush=True)
+                    traceback.print_exc()
+            finally:
+                self._job_queue.task_done()
+
+    def _play_loop(self) -> None:
+        while True:
+            item = self._ready_queue.get()
             try:
                 if item is None:
                     return
-                self._process_job(item)
+                self._play_result(item)
             finally:
-                self._queue.task_done()
+                self._ready_queue.task_done()
+
+    def _play_result(self, result: _SynthResult) -> None:
+        job = result.job
+        pcm = result.pcm
+        sample_rate_hz = result.sample_rate_hz
+        channels = result.channels
+        duration_s = len(pcm) / (sample_rate_hz * channels * 2)
+        print(
+            f"[tts] {job.utterance_id}: {duration_s:.2f}s -> "
+            f"{job.device_uid} @ {job.device_ip}",
+            flush=True,
+        )
+        if self._playback_fn is None:
+            print(f"[tts] {job.utterance_id}: playback disabled (no handler)", flush=True)
+            return
+        ok = self._playback_fn(
+            job.device_ip,
+            job.device_uid,
+            pcm,
+            sample_rate_hz,
+            channels,
+            job.auth_token,
+            stream_end=job.stream_end,
+        )
+        if not ok:
+            print(f"[tts] {job.utterance_id}: playback failed", flush=True)
 
 
 def resolve_voice_wav_path(explicit: str | None) -> str | None:
@@ -298,7 +370,7 @@ def build_tts_from_args(args, *, playback_fn: PlaybackFn | None) -> ChatterboxTt
     else:
         voice_wav = resolve_voice_wav_path(explicit or None)
     return ChatterboxTtsEngine(
-        model=getattr(args, "tts_model", "english"),
+        model=getattr(args, "tts_model", "turbo"),
         device=getattr(args, "tts_device", "cuda"),
         target_sample_rate_hz=getattr(args, "tts_sample_rate_hz", 16000),
         playback_fn=playback_fn,

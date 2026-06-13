@@ -60,7 +60,7 @@ private:
         uint32_t chunkCount;
         uint32_t durationMs;
         size_t pcmLen;
-        uint8_t* pcm;
+        int8_t poolSlot;
     };
 
     static void freeJobPcm(UploadJob& job);
@@ -69,6 +69,10 @@ private:
     bool postFinalizeJson(const char* body);
     bool queuePcmJob(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen);
     bool flushBatch(const char* utteranceId, const char* sessionId);
+    int acquirePoolSlot();
+    void releasePoolSlot(int slot);
+    uint8_t* poolSlotData(int slot);
+    bool waitForWifiHeap();
     bool openStream(const char* utteranceId, const char* sessionId);
     bool writeRaw(const uint8_t* data, size_t len);
     bool writeStream(const uint8_t* pcm, size_t pcmLen);
@@ -96,6 +100,8 @@ private:
     bool m_streamBroken = false;
     uint32_t m_streamBytesWritten = 0;
     uint8_t* m_batchBuffer = nullptr;
+    uint8_t* m_chunkPool = nullptr;
+    bool m_slotUsed[audio::kUploadQueueDepth] = {};
     size_t m_batchLen = 0;
     uint32_t m_postsOk = 0;
     uint32_t m_postsFail = 0;

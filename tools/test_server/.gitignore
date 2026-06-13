@@ -1,1 +1,3 @@
 recordings/
+.hermes_session.json
+hermes_curl_*

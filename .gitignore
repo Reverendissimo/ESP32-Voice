@@ -52,3 +52,6 @@ dist/
 # Local secrets (never commit)
 tools/test_server/.env.local
 tools/test_server/.env
+
+# Stray audio assets (voice refs live under tools/test_server/voices/)
+*.ogg

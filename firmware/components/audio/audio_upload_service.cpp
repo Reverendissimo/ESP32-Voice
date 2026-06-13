@@ -21,6 +21,9 @@ namespace {
 
 constexpr int kStreamTimeoutMs = 60000;
 constexpr int kFinalizeTimeoutMs = 5000;
+constexpr size_t kMinWifiInternalBytes = 24576;
+constexpr int kWriteRetryCount = 4;
+constexpr int kWriteRetryDelayMs = 10;
 
 bool isUrlConfigured(const char* url) {
     return url != nullptr && url[0] != '\0';
@@ -32,8 +35,8 @@ esp_http_client_handle_t makeHttpClient(const char* url, int timeoutMs) {
     config.method = HTTP_METHOD_POST;
     config.transport_type = HTTP_TRANSPORT_OVER_TCP;
     config.timeout_ms = timeoutMs;
-    config.buffer_size = 2048;
-    config.buffer_size_tx = 4096;
+    config.buffer_size = 1024;
+    config.buffer_size_tx = 2048;
     config.keep_alive_enable = true;
     config.keep_alive_idle = 5;
     config.keep_alive_interval = 5;
@@ -67,10 +70,48 @@ void AudioUploadService::setStateMachine(UtteranceStateMachine* stateMachine) {
 }
 
 void AudioUploadService::freeJobPcm(UploadJob& job) {
-    if (job.pcm != nullptr) {
-        heap_caps_free(job.pcm);
-        job.pcm = nullptr;
+    if (job.poolSlot >= 0) {
+        releasePoolSlot(job.poolSlot);
+        job.poolSlot = -1;
     }
+}
+
+int AudioUploadService::acquirePoolSlot() {
+    for (size_t i = 0; i < audio::kUploadQueueDepth; ++i) {
+        if (!m_slotUsed[i]) {
+            m_slotUsed[i] = true;
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void AudioUploadService::releasePoolSlot(int slot) {
+    if (slot < 0 || static_cast<size_t>(slot) >= audio::kUploadQueueDepth) {
+        return;
+    }
+    m_slotUsed[slot] = false;
+}
+
+uint8_t* AudioUploadService::poolSlotData(int slot) {
+    if (m_chunkPool == nullptr || slot < 0 || static_cast<size_t>(slot) >= audio::kUploadQueueDepth) {
+        return nullptr;
+    }
+    return m_chunkPool + (static_cast<size_t>(slot) * audio::kUploadBatchBytes);
+}
+
+bool AudioUploadService::waitForWifiHeap() {
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= kMinWifiInternalBytes) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    ESP_LOGW(
+        kTag,
+        "wifi heap low internal=%lu",
+        static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+    return false;
 }
 
 void AudioUploadService::resetBatch() {
@@ -89,6 +130,15 @@ bool AudioUploadService::start() {
             ESP_LOGE(kTag, "batch buffer PSRAM alloc failed");
             return false;
         }
+    }
+    if (m_chunkPool == nullptr) {
+        const size_t poolBytes = audio::kUploadQueueDepth * audio::kUploadBatchBytes;
+        m_chunkPool = static_cast<uint8_t*>(heap_caps_malloc(poolBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (m_chunkPool == nullptr) {
+            ESP_LOGE(kTag, "chunk pool PSRAM alloc failed (%u bytes)", static_cast<unsigned>(poolBytes));
+            return false;
+        }
+        memset(m_slotUsed, 0, sizeof(m_slotUsed));
     }
     resetBatch();
 
@@ -150,6 +200,11 @@ void AudioUploadService::stop() {
         heap_caps_free(m_batchBuffer);
         m_batchBuffer = nullptr;
     }
+    if (m_chunkPool != nullptr) {
+        heap_caps_free(m_chunkPool);
+        m_chunkPool = nullptr;
+    }
+    memset(m_slotUsed, 0, sizeof(m_slotUsed));
     resetBatch();
     m_streamOpen = false;
     m_streamBytesWritten = 0;
@@ -390,15 +445,23 @@ bool AudioUploadService::postFinalizeJson(const char* body) {
         return false;
     }
     ++m_postsOk;
+    esp_http_client_cleanup(client);
+    m_finalizeHttpClient = nullptr;
     return true;
 }
 
 bool AudioUploadService::sendChunkJob(UploadJob& job) {
-    if (job.pcm == nullptr || job.pcmLen == 0) {
+    if (job.poolSlot < 0 || job.pcmLen == 0) {
         freeJobPcm(job);
         return false;
     }
     if (m_streamBroken) {
+        freeJobPcm(job);
+        return false;
+    }
+
+    uint8_t* pcm = poolSlotData(job.poolSlot);
+    if (pcm == nullptr) {
         freeJobPcm(job);
         return false;
     }
@@ -410,7 +473,21 @@ bool AudioUploadService::sendChunkJob(UploadJob& job) {
         }
     }
 
-    const bool ok = writeStream(job.pcm, job.pcmLen);
+    if (!waitForWifiHeap()) {
+        freeJobPcm(job);
+        m_streamBroken = true;
+        abortStream();
+        return false;
+    }
+
+    bool ok = false;
+    for (int attempt = 0; attempt < kWriteRetryCount; ++attempt) {
+        if (writeStream(pcm, job.pcmLen)) {
+            ok = true;
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(kWriteRetryDelayMs));
+    }
     freeJobPcm(job);
 
     if (!ok) {
@@ -418,6 +495,8 @@ bool AudioUploadService::sendChunkJob(UploadJob& job) {
         abortStream();
         return false;
     }
+
+    vTaskDelay(pdMS_TO_TICKS(2));
 
     if (m_stateMachine != nullptr) {
         m_stateMachine->onChunkUploaded();
@@ -517,16 +596,23 @@ bool AudioUploadService::startUtterance(const char* utteranceId, const char* ses
 }
 
 bool AudioUploadService::queuePcmJob(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen) {
-    if (pcm == nullptr || pcmLen == 0 || m_queue == nullptr) {
+    if (pcm == nullptr || pcmLen == 0 || pcmLen > audio::kUploadBatchBytes || m_queue == nullptr) {
         return false;
     }
 
-    auto* pcmCopy = static_cast<uint8_t*>(heap_caps_malloc(pcmLen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (pcmCopy == nullptr) {
-        ESP_LOGW(kTag, "chunk PSRAM alloc failed (%u bytes)", static_cast<unsigned>(pcmLen));
+    const int slot = acquirePoolSlot();
+    if (slot < 0) {
+        ++m_chunksDropped;
+        ESP_LOGW(kTag, "chunk pool full, dropping chunk");
         return false;
     }
-    memcpy(pcmCopy, pcm, pcmLen);
+
+    uint8_t* slotData = poolSlotData(slot);
+    if (slotData == nullptr) {
+        releasePoolSlot(slot);
+        return false;
+    }
+    memcpy(slotData, pcm, pcmLen);
 
     UploadJob job = {};
     job.type = JobType::Chunk;
@@ -534,7 +620,7 @@ bool AudioUploadService::queuePcmJob(const char* utteranceId, const char* sessio
     strncpy(job.sessionId, sessionId != nullptr ? sessionId : "", sizeof(job.sessionId) - 1);
     job.chunkSeq = m_nextChunkSeq++;
     job.pcmLen = pcmLen;
-    job.pcm = pcmCopy;
+    job.poolSlot = static_cast<int8_t>(slot);
 
     if (xQueueSend(static_cast<QueueHandle_t>(m_queue), &job, pdMS_TO_TICKS(50)) != pdTRUE) {
         freeJobPcm(job);
@@ -594,7 +680,7 @@ bool AudioUploadService::finalizeUtterance(
     strncpy(job.sessionId, sessionId != nullptr ? sessionId : "", sizeof(job.sessionId) - 1);
     job.chunkCount = chunkCount;
     job.durationMs = durationMs;
-    job.pcm = nullptr;
+    job.poolSlot = -1;
 
     if (xQueueSend(static_cast<QueueHandle_t>(m_queue), &job, pdMS_TO_TICKS(500)) != pdTRUE) {
         ESP_LOGW(kTag, "failed to queue finalize");

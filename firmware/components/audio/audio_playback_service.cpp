@@ -19,8 +19,8 @@ static const char* kTag = "audio_playback";
 namespace {
 
 constexpr size_t kCodecWriteBytes = 512;
-constexpr int kEnqueueTimeoutMs = 8000;
-constexpr uint32_t kIdlePollsBeforeDrain = 8;
+constexpr int kEnqueueTimeoutMs = 2000;
+constexpr uint32_t kTailPollsBeforeDrain = 50;
 
 void amplifyPcm(int16_t* samples, size_t count, float gain) {
     for (size_t i = 0; i < count; ++i) {
@@ -208,6 +208,43 @@ size_t AudioPlaybackService::readRing(uint8_t* out, size_t maxBytes) {
     return chunk;
 }
 
+bool AudioPlaybackService::enqueueDecodedPcm(
+    int16_t* samples,
+    size_t sampleCount,
+    uint16_t sampleRateHz,
+    uint8_t channels,
+    bool streamEnd) {
+    if (!m_running || samples == nullptr || sampleCount == 0 || m_ring == nullptr) {
+        return false;
+    }
+    if (sampleCount > (audio::kMaxPlaybackBytes / sizeof(int16_t))) {
+        ESP_LOGW(kTag, "playback payload too large (%u samples)", static_cast<unsigned>(sampleCount));
+        return false;
+    }
+
+    if (!m_streamFormatSet) {
+        m_streamSampleRateHz = sampleRateHz;
+        m_streamChannels = channels;
+        m_streamFormatSet = true;
+    }
+    m_expectMoreChunks = !streamEnd;
+
+    amplifyPcm(samples, sampleCount, m_pcmGain);
+    const size_t byteLen = sampleCount * sizeof(int16_t);
+    const bool ok = writeRing(
+        reinterpret_cast<const uint8_t*>(samples),
+        byteLen,
+        pdMS_TO_TICKS(kEnqueueTimeoutMs));
+    if (!ok) {
+        ESP_LOGW(kTag, "playback ring full after %d ms", kEnqueueTimeoutMs);
+    }
+    return ok;
+}
+
+void AudioPlaybackService::endStream() {
+    m_expectMoreChunks = false;
+}
+
 bool AudioPlaybackService::enqueuePcm(
     const int16_t* samples,
     size_t sampleCount,
@@ -254,7 +291,19 @@ bool AudioPlaybackService::isRunning() const {
 }
 
 bool AudioPlaybackService::isBusy() const {
-    return m_playing || ringUsedBytes() > 0;
+    return m_playing || ringUsedBytes() > 0 || m_expectMoreChunks;
+}
+
+size_t AudioPlaybackService::ringFreeBytes() const {
+    const size_t used = ringUsedBytes();
+    if (used >= m_ringCapacity) {
+        return 0;
+    }
+    return m_ringCapacity - used;
+}
+
+size_t AudioPlaybackService::ringCapacityBytes() const {
+    return m_ringCapacity;
 }
 
 void AudioPlaybackService::drainSpeaker(esp_codec_dev_handle_t speaker) {
@@ -270,6 +319,7 @@ void AudioPlaybackService::drainSpeaker(esp_codec_dev_handle_t speaker) {
 void AudioPlaybackService::onPlaybackIdle() {
     if (m_board == nullptr) {
         setCapturePaused(m_capture, false);
+        m_expectMoreChunks = false;
         return;
     }
     if (m_board->isSpeakerOpen()) {
@@ -279,6 +329,7 @@ void AudioPlaybackService::onPlaybackIdle() {
     }
     setCapturePaused(m_capture, false);
     m_streamFormatSet = false;
+    m_expectMoreChunks = false;
     ESP_LOGI(kTag, "playback idle — mic resumed");
 }
 
@@ -298,11 +349,17 @@ void AudioPlaybackService::runPlaybackLoop() {
         const size_t pending = ringUsedBytes();
         if (pending == 0) {
             if (m_playing) {
+                if (m_expectMoreChunks) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
                 ++idlePolls;
-                if (idlePolls >= kIdlePollsBeforeDrain) {
+                if (idlePolls >= kTailPollsBeforeDrain) {
                     m_playing = false;
                     onPlaybackIdle();
                     idlePolls = 0;
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(10));
                 }
             } else {
                 vTaskDelay(pdMS_TO_TICKS(10));
