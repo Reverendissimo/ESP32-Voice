@@ -5,8 +5,21 @@ Minimal REST server for ESP32-Voice speech upload testing.
 Endpoints (under --prefix, default /api/v1):
   POST /speech/stream    - receive streamed PCM (A3 binary chunked HTTP)
   POST /speech           - receive PCM chunks (legacy A2 JSON + pcm_b64)
-  POST /speech/finalize  - finalize utterance, save WAV, optional echo playback
+  POST /speech/finalize  - finalize utterance, save WAV, run ASR
+  POST /tts/speak        - synthesize text with Chatterbox and play on ESP
   GET  /status           - recent utterances and saved recordings
+
+On finalize, runs a final faster-whisper pass and prints:
+  [asr] utt_N: full transcript
+
+During upload, partial results print as audio arrives:
+  [asr+] utt_N (en, 0.3s): new words...
+
+After ASR finalize, Chatterbox TTS synthesizes a reply and plays it on the ESP:
+  [tts] utt_N: 2.10s -> espbox-... @ 192.168.100.217
+
+Optional: --echo-on to play the raw recording back (off by default).
+Optional: --no-tts to disable Chatterbox synthesis.
 """
 
 from __future__ import annotations
@@ -17,6 +30,7 @@ import binascii
 import json
 import sys
 import threading
+import time
 import wave
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,6 +43,10 @@ try:
     import requests
 except ImportError:
     requests = None  # type: ignore
+
+from ml_runtime import configure_ml_runtime
+from transcriber import WhisperTranscriber, build_transcriber_from_args
+from tts_engine import ChatterboxTtsEngine, build_tts_from_args
 
 
 @dataclass
@@ -86,6 +104,37 @@ class SpeechStore:
                 )
                 self._active[utterance_id] = utt
             utt.chunks[chunk.seq] = chunk
+
+    def begin_stream(
+        self,
+        *,
+        utterance_id: str,
+        session_id: str,
+        device_uid: str,
+        device_name: str,
+        sample_rate_hz: int,
+        channels: int,
+    ) -> None:
+        with self._lock:
+            self._active[utterance_id] = Utterance(
+                utterance_id=utterance_id,
+                session_id=session_id,
+                device_uid=device_uid,
+                device_name=device_name,
+                pcm=b"",
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+                protocol="A3",
+            )
+
+    def append_stream_pcm(self, utterance_id: str, pcm: bytes) -> None:
+        if not pcm:
+            return
+        with self._lock:
+            utt = self._active.get(utterance_id)
+            if utt is None:
+                return
+            utt.pcm = utt.pcm + pcm
 
     def add_stream(
         self,
@@ -204,40 +253,83 @@ def echo_playback(
     sample_rate_hz: int,
     channels: int,
     auth_token: str,
+    *,
+    chunk_bytes: int = 10 * 1024,
 ) -> bool:
     if requests is None:
         print("[echo] requests not installed; skip playback", flush=True)
         return False
 
     url = f"http://{device_ip}/api/v1/play"
-    body = {
-        "v": 1,
-        "target_device_uid": device_uid,
-        "request_id": "test_server_echo",
-        "command_id": "echo_1",
-        "sample_rate_hz": sample_rate_hz,
-        "channels": channels,
-        "pcm_b64": base64.b64encode(pcm).decode("ascii"),
-    }
     headers = {"Content-Type": "application/json"}
     if auth_token:
         headers["X-Auth-Token"] = auth_token
 
-    try:
-        resp = requests.post(url, json=body, headers=headers, timeout=10)
-        ok = resp.status_code == 200
-        print(f"[echo] POST /play -> {resp.status_code}", flush=True)
-        return ok
-    except requests.RequestException as exc:
-        print(f"[echo] failed: {exc}", flush=True)
-        return False
+    if chunk_bytes <= 0:
+        chunk_bytes = 10 * 1024
+    chunk_bytes = chunk_bytes - (chunk_bytes % 2)
+
+    total = len(pcm)
+    sent = 0
+    chunk_idx = 0
+    ok = True
+    while sent < total:
+        piece = pcm[sent : sent + chunk_bytes]
+        body = {
+            "v": 1,
+            "target_device_uid": device_uid,
+            "request_id": f"test_server_echo_{chunk_idx}",
+            "command_id": f"echo_{chunk_idx}",
+            "sample_rate_hz": sample_rate_hz,
+            "channels": channels,
+            "pcm_b64": base64.b64encode(piece).decode("ascii"),
+        }
+
+        posted = False
+        for attempt in range(6):
+            try:
+                resp = requests.post(url, json=body, headers=headers, timeout=20)
+                if resp.status_code == 200:
+                    posted = True
+                    print(
+                        f"[echo] chunk {chunk_idx} ok ({len(piece)} bytes, "
+                        f"{sent + len(piece)}/{total})",
+                        flush=True,
+                    )
+                    break
+                if resp.status_code == 503:
+                    time.sleep(0.15)
+                    continue
+                ok = False
+                print(
+                    f"[echo] chunk {chunk_idx} POST /play -> {resp.status_code} "
+                    f"({len(piece)} bytes)",
+                    flush=True,
+                )
+                break
+            except requests.RequestException as exc:
+                ok = False
+                print(f"[echo] chunk {chunk_idx} failed: {exc}", flush=True)
+                break
+
+        if not posted:
+            ok = False
+            break
+
+        sent += len(piece)
+        chunk_idx += 1
+    return ok
 
 
 class ServerConfig:
     prefix: str
     store: SpeechStore
-    echo_device_ip: str
-    echo_auth_token: str
+    echo_enabled: bool = False
+    echo_device_ip: str = ""
+    echo_auth_token: str = ""
+    transcriber: WhisperTranscriber | None = None
+    tts: ChatterboxTtsEngine | None = None
+    reply_ctx: dict[str, dict[str, str]]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -260,6 +352,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_chunked_body(self) -> bytes:
         chunks: list[bytes] = []
+        self._read_chunked_body_incremental(chunks.append)
+        return b"".join(chunks)
+
+    def _read_chunked_body_incremental(self, on_block) -> int:
+        total = 0
         while True:
             line = self.rfile.readline()
             if not line:
@@ -271,9 +368,12 @@ class Handler(BaseHTTPRequestHandler):
             if chunk_size == 0:
                 self.rfile.readline()
                 break
-            chunks.append(self.rfile.read(chunk_size))
+            data = self.rfile.read(chunk_size)
+            if data:
+                on_block(data)
+                total += len(data)
             self.rfile.readline()
-        return b"".join(chunks)
+        return total
 
     def _read_binary_body(self) -> bytes:
         transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
@@ -284,6 +384,29 @@ class Handler(BaseHTTPRequestHandler):
         if length is not None:
             return self.rfile.read(int(length))
         return self.rfile.read()
+
+    def _read_binary_body_incremental(self, on_block) -> int:
+        transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
+        if "chunked" in transfer_encoding:
+            return self._read_chunked_body_incremental(on_block)
+
+        length = self.headers.get("Content-Length")
+        if length is None:
+            data = self.rfile.read()
+            if data:
+                on_block(data)
+            return len(data)
+
+        remaining = int(length)
+        total = 0
+        while remaining > 0:
+            block = self.rfile.read(min(8192, remaining))
+            if not block:
+                break
+            on_block(block)
+            total += len(block)
+            remaining -= len(block)
+        return total
 
     def _header(self, name: str, default: str = "") -> str:
         return self.headers.get(name, default)
@@ -316,6 +439,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"POST {self.cfg.prefix}/speech/stream",
                 f"POST {self.cfg.prefix}/speech",
                 f"POST {self.cfg.prefix}/speech/finalize",
+                f"POST {self.cfg.prefix}/tts/speak",
                 f"GET  {self.cfg.prefix}/status",
                 "",
                 f"Recordings: {status['recordings_dir']}",
@@ -343,27 +467,51 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            pcm = self._read_binary_body()
             sample_rate_hz = int(self._header("X-Sample-Rate", "16000"))
             channels = int(self._header("X-Channels", "1"))
-        except (ValueError, OSError) as exc:
+        except ValueError as exc:
             self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": str(exc)}})
             return
 
-        self.cfg.store.add_stream(
+        session_id = self._header("X-Session-Id")
+        device_uid = self._header("X-Device-Uid")
+        device_name = self._header("X-Device-Name")
+
+        self.cfg.store.begin_stream(
             utterance_id=utterance_id,
-            session_id=self._header("X-Session-Id"),
-            device_uid=self._header("X-Device-Uid"),
-            device_name=self._header("X-Device-Name"),
-            pcm=pcm,
+            session_id=session_id,
+            device_uid=device_uid,
+            device_name=device_name,
             sample_rate_hz=sample_rate_hz,
             channels=channels,
         )
-        device_uid = self._header("X-Device-Uid", "unknown")
-        duration_s = len(pcm) / (sample_rate_hz * channels * 2) if pcm else 0.0
+        if self.cfg.transcriber is not None:
+            self.cfg.transcriber.begin_utterance(
+                utterance_id,
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+            )
+
+        def on_pcm_block(block: bytes) -> None:
+            self.cfg.store.append_stream_pcm(utterance_id, block)
+            if self.cfg.transcriber is not None:
+                self.cfg.transcriber.feed(
+                    utterance_id,
+                    block,
+                    sample_rate_hz=sample_rate_hz,
+                    channels=channels,
+                )
+
+        try:
+            pcm_len = self._read_binary_body_incremental(on_pcm_block)
+        except OSError as exc:
+            self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": str(exc)}})
+            return
+
+        duration_s = pcm_len / (sample_rate_hz * channels * 2) if pcm_len else 0.0
         print(
-            f"[stream] {device_uid} {utterance_id}: "
-            f"{len(pcm)} bytes ({sample_rate_hz} Hz, {channels} ch, ~{duration_s:.2f}s)",
+            f"[stream] {device_uid or 'unknown'} {utterance_id}: "
+            f"{pcm_len} bytes ({sample_rate_hz} Hz, {channels} ch, ~{duration_s:.2f}s)",
             flush=True,
         )
         self._send_json(
@@ -373,7 +521,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "protocol": "A3",
                 "utterance_id": utterance_id,
-                "pcm_bytes": len(pcm),
+                "pcm_bytes": pcm_len,
             },
         )
 
@@ -417,12 +565,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"v": 1, "error": result})
                 return
 
-            if self.cfg.echo_device_ip and result.get("device_uid"):
+            utterance_id = str(result.get("utterance_id", ""))
+            device_uid = str(result.get("device_uid", ""))
+            if utterance_id and device_uid:
+                self.cfg.reply_ctx[utterance_id] = {
+                    "device_uid": device_uid,
+                    "device_ip": self.cfg.echo_device_ip or self.client_address[0],
+                }
+
+            if self.cfg.echo_enabled and device_uid:
+                device_ip = self.cfg.echo_device_ip or self.client_address[0]
                 pcm_path = Path(result["wav_path"])
                 with wave.open(str(pcm_path), "rb") as wf:
                     pcm = wf.readframes(wf.getnframes())
                     echo_playback(
-                        self.cfg.echo_device_ip,
+                        device_ip,
                         result["device_uid"],
                         pcm,
                         int(result["sample_rate_hz"]),
@@ -430,7 +587,66 @@ class Handler(BaseHTTPRequestHandler):
                         self.cfg.echo_auth_token,
                     )
 
+            if self.cfg.transcriber is not None and result.get("utterance_id"):
+                utterance_id = str(result["utterance_id"])
+                if getattr(self.server, "no_streaming_asr", False):
+                    with wave.open(str(result["wav_path"]), "rb") as wf:
+                        pcm = wf.readframes(wf.getnframes())
+                    self.cfg.transcriber.load_pcm_and_finalize(
+                        utterance_id,
+                        pcm,
+                        sample_rate_hz=int(result["sample_rate_hz"]),
+                        channels=int(result["channels"]),
+                    )
+                else:
+                    self.cfg.transcriber.finalize_utterance(utterance_id)
+
             self._send_json(200, {"v": 1, **result})
+            return
+
+        if path == "/tts/speak":
+            if self.cfg.tts is None:
+                self._send_json(
+                    503,
+                    {"v": 1, "error": {"code": "TTS_DISABLED", "message": "TTS is disabled"}},
+                )
+                return
+
+            text = str(payload.get("text", "")).strip()
+            device_uid = str(payload.get("device_uid", "")).strip()
+            if not text or not device_uid:
+                self._send_json(
+                    400,
+                    {"v": 1, "error": {"code": "INVALID_REQUEST", "message": "text and device_uid required"}},
+                )
+                return
+
+            device_ip = str(payload.get("device_ip", "")).strip()
+            if not device_ip:
+                device_ip = self.cfg.echo_device_ip or self.client_address[0]
+
+            prompt_wav = payload.get("audio_prompt_path") or payload.get("prompt_wav_path")
+            utterance_id = str(payload.get("utterance_id") or f"tts_{int(time.time())}")
+
+            self.cfg.tts.speak_async(
+                utterance_id,
+                text,
+                device_uid=device_uid,
+                device_ip=device_ip,
+                prompt_wav_path=str(prompt_wav) if prompt_wav else None,
+                auth_token=self.cfg.echo_auth_token,
+            )
+            self._send_json(
+                200,
+                {
+                    "v": 1,
+                    "ok": True,
+                    "utterance_id": utterance_id,
+                    "device_uid": device_uid,
+                    "device_ip": device_ip,
+                    "queued": True,
+                },
+            )
             return
 
         self._send_json(404, {"v": 1, "error": {"code": "NOT_FOUND", "message": "Unknown route"}})
@@ -447,38 +663,175 @@ def parse_args() -> argparse.Namespace:
         help="Directory for WAV files (default: tools/test_server/recordings)",
     )
     parser.add_argument(
+        "--echo-on",
+        action="store_true",
+        help="After finalize, play audio back on the ESP (default: off)",
+    )
+    parser.add_argument(
         "--echo-device-ip",
         default="",
-        help="After finalize, POST recorded audio to http://IP/api/v1/play (optional)",
+        help="Fixed ESP IP for echo /play (default: use upload client IP)",
     )
     parser.add_argument("--echo-auth-token", default="", help="X-Auth-Token for echo /play")
+    parser.add_argument(
+        "--no-whisper",
+        action="store_true",
+        help="Disable faster-whisper transcription on finalize",
+    )
+    parser.add_argument(
+        "--whisper-model",
+        default="base",
+        help="faster-whisper model size/name (default: base)",
+    )
+    parser.add_argument(
+        "--whisper-device",
+        default="cuda",
+        choices=("cuda", "cpu", "auto"),
+        help="Inference device (default: cuda)",
+    )
+    parser.add_argument(
+        "--whisper-compute-type",
+        default="float16",
+        help="ctranslate2 compute type (default: float16; use int8 on CPU)",
+    )
+    parser.add_argument(
+        "--whisper-beam-size",
+        type=int,
+        default=1,
+        help="Beam size for decoding (default: 1)",
+    )
+    parser.add_argument(
+        "--whisper-language",
+        default="en",
+        help="Whisper language code (default: en). Use 'auto' to detect language.",
+    )
+    parser.add_argument(
+        "--whisper-flush-ms",
+        type=int,
+        default=1200,
+        help="Run partial ASR every N ms of new audio during upload (default: 1200)",
+    )
+    parser.add_argument(
+        "--no-streaming-asr",
+        action="store_true",
+        help="Only transcribe on finalize (no incremental [asr+] during upload)",
+    )
+    parser.add_argument(
+        "--no-tts",
+        action="store_true",
+        help="Disable Chatterbox TTS replies to the ESP",
+    )
+    parser.add_argument(
+        "--tts-model",
+        default="english",
+        choices=("english", "turbo", "multilingual"),
+        help="Chatterbox model (default: english)",
+    )
+    parser.add_argument(
+        "--tts-device",
+        default="cuda",
+        choices=("cuda", "cpu", "mps"),
+        help="Chatterbox inference device (default: cuda)",
+    )
+    parser.add_argument(
+        "--tts-sample-rate-hz",
+        type=int,
+        default=16000,
+        help="Resample TTS output for ESP playback (default: 16000)",
+    )
+    parser.add_argument(
+        "--tts-voice-wav",
+        default="",
+        help="Override Chatterbox voice clone WAV (default: voices/karla.wav)",
+    )
+    parser.add_argument(
+        "--tts-builtin-voice",
+        action="store_true",
+        help="Use Chatterbox builtin voice instead of the default female clone",
+    )
+    parser.add_argument(
+        "--hf-token",
+        default="",
+        help="Hugging Face token (or set HF_TOKEN env var)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    configure_ml_runtime(hf_token=args.hf_token)
     here = Path(__file__).resolve().parent
     recordings = Path(args.recordings_dir) if args.recordings_dir else here / "recordings"
 
     cfg = ServerConfig()
     cfg.prefix = args.prefix if args.prefix.startswith("/") else f"/{args.prefix}"
     cfg.store = SpeechStore(recordings)
+    cfg.echo_enabled = args.echo_on
     cfg.echo_device_ip = args.echo_device_ip
     cfg.echo_auth_token = args.echo_auth_token
+    cfg.reply_ctx = {}
+    cfg.tts = build_tts_from_args(args, playback_fn=echo_playback)
+
+    def on_asr_final(utterance_id: str, text: str) -> None:
+        ctx = cfg.reply_ctx.pop(utterance_id, None)
+        if cfg.tts is None or ctx is None:
+            return
+        reply = text
+        cfg.tts.speak_async(
+            utterance_id,
+            reply,
+            device_uid=ctx["device_uid"],
+            device_ip=ctx["device_ip"],
+            auth_token=cfg.echo_auth_token,
+        )
+
+    cfg.transcriber = build_transcriber_from_args(args, on_final=on_asr_final)
+
+    if cfg.tts is not None:
+        cfg.tts.preload()
+        cfg.tts.start()
+
+    if cfg.transcriber is not None:
+        cfg.transcriber.preload()
+        cfg.transcriber.start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.cfg = cfg  # type: ignore[attr-defined]
+    server.no_streaming_asr = args.no_streaming_asr  # type: ignore[attr-defined]
 
     print(f"Listening on http://{args.host}:{args.port}{cfg.prefix}", flush=True)
     print("Protocol A3 (primary):", flush=True)
     print(f"  POST {cfg.prefix}/speech/stream  (binary PCM, chunked HTTP body + X-* headers)", flush=True)
     print(f"  POST {cfg.prefix}/speech/finalize  (JSON metadata after stream closes)", flush=True)
+    print(f"  POST {cfg.prefix}/tts/speak  (JSON text -> Chatterbox -> ESP /play)", flush=True)
     print("Legacy A2:", flush=True)
     print(f"  POST {cfg.prefix}/speech  (JSON + pcm_b64 per chunk)", flush=True)
     print(f"  GET  {cfg.prefix}/status", flush=True)
     print(f"Recordings -> {recordings}", flush=True)
-    if args.echo_device_ip:
-        print(f"Echo playback -> http://{args.echo_device_ip}/api/v1/play", flush=True)
+    if args.echo_on:
+        target = args.echo_device_ip or "<upload client IP>"
+        print(f"Echo playback -> http://{target}/api/v1/play", flush=True)
+    else:
+        print("Echo -> disabled", flush=True)
+    if cfg.transcriber is not None:
+        mode = "streaming" if not args.no_streaming_asr else "finalize-only"
+        print(
+            f"ASR -> faster-whisper model={args.whisper_model} "
+            f"device={args.whisper_device} compute={args.whisper_compute_type} "
+            f"language={cfg.transcriber.language_label} "
+            f"mode={mode} flush_ms={args.whisper_flush_ms}",
+            flush=True,
+        )
+    else:
+        print("ASR -> disabled", flush=True)
+    if cfg.tts is not None:
+        print(
+            f"TTS -> chatterbox model={args.tts_model} device={args.tts_device} "
+            f"out_rate={args.tts_sample_rate_hz}Hz voice={cfg.tts.voice_label}",
+            flush=True,
+        )
+    else:
+        print("TTS -> disabled", flush=True)
     print("", flush=True)
     print("On the BOX serial CLI (use your PC/LAN IP):", flush=True)
     print(f"  callback_base_set http://YOUR_LAN_IP:{args.port}{cfg.prefix}", flush=True)
@@ -489,6 +842,11 @@ def main() -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.", flush=True)
+    finally:
+        if cfg.transcriber is not None:
+            cfg.transcriber.stop()
+        if cfg.tts is not None:
+            cfg.tts.stop()
     return 0
 
 

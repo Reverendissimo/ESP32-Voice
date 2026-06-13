@@ -151,6 +151,21 @@ bool AudioCaptureService::isRunning() const {
     return m_running && m_taskHandle != nullptr;
 }
 
+void AudioCaptureService::setPlaybackPaused(bool paused) {
+    m_playbackPaused = paused;
+}
+
+void AudioCaptureService::setUserMuted(bool muted) {
+    m_userMuted = muted;
+    if (muted && m_utteranceFsm != nullptr && m_utteranceFsm->isStreaming()) {
+        m_utteranceFsm->cancelActive();
+    }
+}
+
+bool AudioCaptureService::isUserMuted() const {
+    return m_userMuted;
+}
+
 uint32_t AudioCaptureService::lastFrameEnergy() const {
     return m_lastEnergy;
 }
@@ -229,6 +244,11 @@ void AudioCaptureService::runCaptureLoop() {
     audio::PcmFrame frame = {};
 
     while (m_running) {
+        if (m_playbackPaused || m_userMuted) {
+            vTaskDelay(pdMS_TO_TICKS(audio::kFrameDurationMs));
+            continue;
+        }
+
         const int readRc = esp_codec_dev_read(mic, m_readBuffer, static_cast<int>(hwFrameBytes));
         if (readRc != ESP_CODEC_DEV_OK) {
             ++m_readFailCount;

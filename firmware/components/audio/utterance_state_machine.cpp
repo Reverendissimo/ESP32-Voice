@@ -82,6 +82,14 @@ bool UtteranceStateMachine::endUtterance() {
     return ok;
 }
 
+void UtteranceStateMachine::cancelActive() {
+    if (m_state == UtteranceState::Idle) {
+        return;
+    }
+    ESP_LOGI(kTag, "utterance cancelled id=%s", m_utteranceId);
+    endUtterance();
+}
+
 bool UtteranceStateMachine::handleVadEvent(audio::VadEventType event, uint16_t frameDurationMs) {
     switch (event) {
         case audio::VadEventType::SpeechStart:

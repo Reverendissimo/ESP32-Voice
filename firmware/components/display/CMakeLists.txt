@@ -8,5 +8,5 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
-        json esp-box-3 esp_http_client config freertos
+        json esp-box-3 esp_http_client config freertos audio
 )

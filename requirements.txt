@@ -6,3 +6,11 @@ esptool>=4.7
 pytest-embedded>=1.10
 pytest-embedded-idf>=1.10
 pytest-embedded-serial>=1.10
+
+# Test server ASR + TTS (tools/test_server/server.py)
+faster-whisper>=1.0
+chatterbox-tts>=0.1.7
+setuptools<81
+peft>=0.19
+torch==2.6.0
+torchaudio==2.6.0

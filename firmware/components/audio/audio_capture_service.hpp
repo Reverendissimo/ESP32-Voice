@@ -57,6 +57,10 @@ public:
 
     bool isRunning() const;
 
+    void setPlaybackPaused(bool paused);
+    void setUserMuted(bool muted);
+    bool isUserMuted() const;
+
     uint32_t lastFrameEnergy() const;
     uint32_t peakFrameEnergy() const;
     uint32_t readFailCount() const;
@@ -86,6 +90,8 @@ private:
     size_t m_preRollWriteIdx = 0;
     bool m_preRollFull = false;
     size_t m_preRollFrameCount = 0;
+    volatile bool m_playbackPaused = false;
+    volatile bool m_userMuted = false;
 
     void updatePreRollCapacity();
     void pushPreRoll(const audio::PcmFrame& frame);

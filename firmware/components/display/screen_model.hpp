@@ -33,6 +33,7 @@ enum class ComponentKind : uint8_t {
     List,
     Input,
     Progress,
+    Slider,
     Unknown,
 };
 

@@ -12,10 +12,12 @@
 #include "auth_context.hpp"
 #include "cJSON.h"
 #include "error_response_factory.hpp"
+#include "esp_heap_caps.h"
 #include "http_response_helpers.hpp"
 #include "mbedtls/base64.h"
 
-static constexpr size_t kRequestBodyMax = 8192;
+// JSON + base64 overhead: ~8 KB PCM needs ~11 KB body.
+static constexpr size_t kRequestBodyMax = 16 * 1024;
 
 namespace {
 
@@ -88,6 +90,17 @@ esp_err_t sendOk(httpd_req_t* req, const char* requestId, const char* commandId)
     return sendJsonResponse(req, 200, body);
 }
 
+void copyJsonString(const cJSON* node, char* out, size_t outLen) {
+    if (out == nullptr || outLen == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (cJSON_IsString(node) && node->valuestring != nullptr) {
+        strncpy(out, node->valuestring, outLen - 1);
+        out[outLen - 1] = '\0';
+    }
+}
+
 }  // namespace
 
 bool PlayRoute::registerRoutes(httpd_handle_t server, const ApiContext* context) const {
@@ -106,7 +119,10 @@ bool PlayRoute::registerRoutes(httpd_handle_t server, const ApiContext* context)
 
 esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
     auto* context = static_cast<ApiContext*>(req->user_ctx);
-    char* body = static_cast<char*>(malloc(kRequestBodyMax));
+    char* body = static_cast<char*>(heap_caps_malloc(kRequestBodyMax, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (body == nullptr) {
+        body = static_cast<char*>(malloc(kRequestBodyMax));
+    }
     if (body == nullptr) {
         ErrorResponseFactory errors;
         char errBody[256] = {};
@@ -116,7 +132,7 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
 
     size_t bodyLen = 0;
     if (!readBody(req, body, kRequestBodyMax, bodyLen)) {
-        free(body);
+        heap_caps_free(body);
         ErrorResponseFactory errors;
         char errBody[256] = {};
         errors.build("INVALID_REQUEST", "Request body too large or unreadable", false, "", errBody, sizeof(errBody));
@@ -124,17 +140,17 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
     }
 
     cJSON* root = cJSON_Parse(body);
+    heap_caps_free(body);
     if (root == nullptr) {
-        free(body);
         ErrorResponseFactory errors;
         char errBody[256] = {};
         errors.build("INVALID_REQUEST", "Malformed JSON", false, "", errBody, sizeof(errBody));
         return sendJsonResponse(req, 400, errBody);
     }
-    free(body);
 
-    const cJSON* requestIdNode = cJSON_GetObjectItemCaseSensitive(root, "request_id");
-    const char* requestId = cJSON_IsString(requestIdNode) ? requestIdNode->valuestring : "";
+    char requestId[64] = {};
+    char commandId[64] = {};
+    copyJsonString(cJSON_GetObjectItemCaseSensitive(root, "request_id"), requestId, sizeof(requestId));
 
     if (!requireAuth(req, context, requestId)) {
         cJSON_Delete(root);
@@ -179,9 +195,14 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
         channels = static_cast<uint8_t>(channelsNode->valueint);
     }
 
+    copyJsonString(cJSON_GetObjectItemCaseSensitive(root, "command_id"), commandId, sizeof(commandId));
+
     const size_t b64Len = strlen(pcmNode->valuestring);
     size_t decodedMax = (b64Len * 3) / 4 + 4;
-    auto* decoded = static_cast<uint8_t*>(malloc(decodedMax));
+    auto* decoded = static_cast<uint8_t*>(heap_caps_malloc(decodedMax, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (decoded == nullptr) {
+        decoded = static_cast<uint8_t*>(malloc(decodedMax));
+    }
     if (decoded == nullptr) {
         ErrorResponseFactory errors;
         char errBody[256] = {};
@@ -193,23 +214,20 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
     size_t decodedLen = 0;
     const int rc = mbedtls_base64_decode(decoded, decodedMax, &decodedLen,
                                          reinterpret_cast<const unsigned char*>(pcmNode->valuestring), b64Len);
+    cJSON_Delete(root);
+
     if (rc != 0 || decodedLen < sizeof(int16_t) || (decodedLen % sizeof(int16_t)) != 0) {
-        free(decoded);
+        heap_caps_free(decoded);
         ErrorResponseFactory errors;
         char errBody[256] = {};
         errors.build("INVALID_REQUEST", "Invalid pcm_b64 payload", false, requestId, errBody, sizeof(errBody));
-        cJSON_Delete(root);
         return sendJsonResponse(req, 400, errBody);
     }
-
-    const cJSON* commandIdNode = cJSON_GetObjectItemCaseSensitive(root, "command_id");
-    const char* commandId = cJSON_IsString(commandIdNode) ? commandIdNode->valuestring : "";
 
     const size_t sampleCount = decodedLen / sizeof(int16_t);
     const bool queued = context->audioPlayback->enqueuePcm(
         reinterpret_cast<const int16_t*>(decoded), sampleCount, sampleRateHz, channels);
-    free(decoded);
-    cJSON_Delete(root);
+    heap_caps_free(decoded);
 
     if (!queued) {
         ErrorResponseFactory errors;

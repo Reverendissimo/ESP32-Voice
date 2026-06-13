@@ -107,7 +107,7 @@ bool AppBootstrap::startAudioPipeline() {
         activeConfig.audio,
         activeConfig.vad);
     m_audioPlaybackService.configure(
-        &m_audioBoard, activeConfig.audio.sampleRateHz, activeConfig.audio.channels);
+        &m_audioBoard, activeConfig.audio.sampleRateHz, activeConfig.audio.channels, &m_audioCaptureService);
 
     if (m_audioUploadService.start()) {
         ESP_LOGI(kTag, "upload service started");
@@ -141,6 +141,7 @@ bool AppBootstrap::startAudioPipeline() {
 bool AppBootstrap::startDisplayPipeline() {
     const config::AppConfig& activeConfig = m_configManager.active();
     m_displayService.setUiEventClient(&m_uiEventClient);
+    m_displayService.configureLocalControls(&m_audioCaptureService, &m_audioPlaybackService);
 
     if (!m_displayService.initialize(activeConfig.display.defaultBrightness)) {
         ESP_LOGW(kTag, "display init failed — screen updates disabled");
@@ -168,8 +169,7 @@ bool AppBootstrap::showDeferredIdleScreen() {
     }
 
     const config::AppConfig& activeConfig = m_configManager.active();
-    if (!m_displayService.showSimpleScreen(
-            display::ScreenMode::Idle, activeConfig.identity.deviceName, "Ready")) {
+    if (!m_displayService.showIdleScreen(activeConfig.identity.deviceName)) {
         ESP_LOGW(kTag, "idle screen render failed");
         return false;
     }

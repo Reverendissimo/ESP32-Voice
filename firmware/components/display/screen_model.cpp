@@ -87,6 +87,8 @@ const char* componentKindToString(ComponentKind kind) {
             return "input";
         case ComponentKind::Progress:
             return "progress";
+        case ComponentKind::Slider:
+            return "slider";
         default:
             return "unknown";
     }
@@ -118,6 +120,10 @@ bool componentKindFromString(const char* value, ComponentKind& out) {
     }
     if (strcmp(value, "progress") == 0) {
         out = ComponentKind::Progress;
+        return true;
+    }
+    if (strcmp(value, "slider") == 0) {
+        out = ComponentKind::Slider;
         return true;
     }
     return false;

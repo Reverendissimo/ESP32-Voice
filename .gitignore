@@ -48,3 +48,7 @@ sdkconfig.ci
 
 # Local flash bundles (copy to host manually)
 dist/
+
+# Local secrets (never commit)
+tools/test_server/.env.local
+tools/test_server/.env

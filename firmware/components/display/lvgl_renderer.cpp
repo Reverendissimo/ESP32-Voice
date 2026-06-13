@@ -33,6 +33,20 @@ void LvglRenderer::onButtonClicked(lv_event_t* event) {
     renderer->m_buttonHandler(binding->componentId, binding->actionId, renderer->m_buttonContext);
 }
 
+void LvglRenderer::onSliderReleased(lv_event_t* event) {
+    if (event == nullptr) {
+        return;
+    }
+    lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
+    auto* renderer = static_cast<LvglRenderer*>(lv_obj_get_user_data(target));
+    auto* binding = static_cast<SliderBinding*>(lv_event_get_user_data(event));
+    if (binding == nullptr || renderer == nullptr || renderer->m_sliderHandler == nullptr) {
+        return;
+    }
+    const int value = static_cast<int>(lv_slider_get_value(target));
+    renderer->m_sliderHandler(binding->componentId, binding->actionId, value, renderer->m_sliderContext);
+}
+
 bool LvglRenderer::initialize(uint8_t brightnessPercent) {
     if (m_ready) {
         return true;
@@ -86,6 +100,11 @@ void LvglRenderer::setButtonHandler(ButtonHandler handler, void* context) {
     m_buttonContext = context;
 }
 
+void LvglRenderer::setSliderHandler(SliderHandler handler, void* context) {
+    m_sliderHandler = handler;
+    m_sliderContext = context;
+}
+
 bool LvglRenderer::scheduleRender(const display::ScreenModel& model) {
     if (!m_ready) {
         return false;
@@ -116,8 +135,17 @@ void LvglRenderer::clearButtonBindings() {
     m_buttonBindingCount = 0;
 }
 
+void LvglRenderer::clearSliderBindings() {
+    if (m_sliderBindings != nullptr) {
+        heap_caps_free(m_sliderBindings);
+        m_sliderBindings = nullptr;
+    }
+    m_sliderBindingCount = 0;
+}
+
 void LvglRenderer::renderOnLvglTask(const display::ScreenModel& model) {
     clearButtonBindings();
+    clearSliderBindings();
 
     lv_obj_t* screen = lv_screen_active();
     lv_obj_clean(screen);
@@ -150,9 +178,12 @@ void LvglRenderer::renderOnLvglTask(const display::ScreenModel& model) {
     }
 
     uint8_t buttonCount = 0;
+    uint8_t sliderCount = 0;
     for (uint8_t i = 0; i < model.componentCount; ++i) {
         if (model.components[i].kind == display::ComponentKind::Button) {
             ++buttonCount;
+        } else if (model.components[i].kind == display::ComponentKind::Slider) {
+            ++sliderCount;
         }
     }
 
@@ -162,6 +193,15 @@ void LvglRenderer::renderOnLvglTask(const display::ScreenModel& model) {
         if (m_buttonBindings == nullptr) {
             ESP_LOGW(kTag, "button binding alloc failed");
             buttonCount = 0;
+        }
+    }
+
+    if (sliderCount > 0) {
+        m_sliderBindings = static_cast<SliderBinding*>(
+            heap_caps_malloc(sizeof(SliderBinding) * sliderCount, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        if (m_sliderBindings == nullptr) {
+            ESP_LOGW(kTag, "slider binding alloc failed");
+            sliderCount = 0;
         }
     }
 
@@ -222,6 +262,23 @@ void LvglRenderer::renderOnLvglTask(const display::ScreenModel& model) {
                 lv_obj_set_width(bar, LV_PCT(100));
                 lv_bar_set_range(bar, 0, 100);
                 lv_bar_set_value(bar, component.progressPercent, LV_ANIM_OFF);
+                break;
+            }
+            case display::ComponentKind::Slider: {
+                lv_obj_t* label = lv_label_create(screen);
+                lv_label_set_text(label, component.text);
+                lv_obj_set_style_text_color(label, lv_color_white(), 0);
+                lv_obj_t* slider = lv_slider_create(screen);
+                lv_obj_set_width(slider, LV_PCT(100));
+                lv_slider_set_range(slider, 0, 100);
+                lv_slider_set_value(slider, component.progressPercent, LV_ANIM_OFF);
+                if (m_sliderBindings != nullptr && m_sliderBindingCount < sliderCount) {
+                    SliderBinding* binding = &m_sliderBindings[m_sliderBindingCount++];
+                    strncpy(binding->componentId, component.id, sizeof(binding->componentId) - 1);
+                    strncpy(binding->actionId, component.actionId, sizeof(binding->actionId) - 1);
+                    lv_obj_add_event_cb(slider, onSliderReleased, LV_EVENT_RELEASED, binding);
+                    lv_obj_set_user_data(slider, this);
+                }
                 break;
             }
             default:

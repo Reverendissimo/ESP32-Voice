@@ -68,6 +68,11 @@ public:
      */
     void onChunkUploaded();
 
+    /**
+     * @brief Finalizes and clears any in-progress utterance (e.g. mic muted).
+     */
+    void cancelActive();
+
 private:
     bool beginUtterance();
     bool endUtterance();

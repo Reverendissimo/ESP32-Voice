@@ -39,7 +39,7 @@ bool Box3AudioBoard::initialize() {
         ESP_LOGE(kTag, "speaker codec init failed");
         return false;
     }
-    esp_codec_dev_set_out_vol(m_speaker, 70);
+    esp_codec_dev_set_out_vol(m_speaker, 100);
 
     m_microphone = bsp_audio_codec_microphone_init();
     if (m_microphone == nullptr) {
@@ -67,7 +67,7 @@ bool Box3AudioBoard::openDevice(
     };
 
     if (!isMic) {
-        esp_codec_dev_set_out_vol(device, 70);
+        esp_codec_dev_set_out_vol(device, 100);
     }
 
     if (esp_codec_dev_open(device, &format) != ESP_CODEC_DEV_OK) {
