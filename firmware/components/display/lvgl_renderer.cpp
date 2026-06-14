@@ -156,10 +156,11 @@ void LvglRenderer::renderOnLvglTask(const display::ScreenModel& model) {
     lv_obj_set_style_pad_row(screen, 8, 0);
 
     char modeLabel[64];
+    const bool micOff = model.mode == display::ScreenMode::MicOff;
     snprintf(modeLabel, sizeof(modeLabel), "%s", display::screenModeToString(model.mode));
     lv_obj_t* badge = lv_label_create(screen);
-    lv_label_set_text(badge, modeLabel);
-    lv_obj_set_style_text_color(badge, lv_color_hex(0x8BC34A), 0);
+    lv_label_set_text(badge, micOff ? "MIC OFF" : modeLabel);
+    lv_obj_set_style_text_color(badge, lv_color_hex(micOff ? 0xFF5252 : 0x8BC34A), 0);
 
     if (model.title[0] != '\0') {
         lv_obj_t* title = lv_label_create(screen);
@@ -172,7 +173,10 @@ void LvglRenderer::renderOnLvglTask(const display::ScreenModel& model) {
     if (model.subtitle[0] != '\0') {
         lv_obj_t* subtitle = lv_label_create(screen);
         lv_label_set_text(subtitle, model.subtitle);
-        lv_obj_set_style_text_color(subtitle, lv_color_hex(0xB0BEC5), 0);
+        lv_obj_set_style_text_color(
+            subtitle,
+            lv_color_hex(model.subtitleAlert ? 0xFF5252 : 0xB0BEC5),
+            0);
         lv_obj_set_width(subtitle, LV_PCT(100));
         lv_label_set_long_mode(subtitle, LV_LABEL_LONG_WRAP);
     }

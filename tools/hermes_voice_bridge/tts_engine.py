@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
+from esp_playback import EspPlayStream
 from ml_runtime import configure_chatterbox_attention, configure_ml_runtime, quiet_hf_hub_noise
 
 configure_ml_runtime()
@@ -90,6 +91,7 @@ class ChatterboxTtsEngine:
         playback_fn: PlaybackFn | None = None,
         voice_wav_path: str | None = None,
         min_prompt_seconds: float = 5.0,
+        play_chunk_bytes: int = 12288,
     ) -> None:
         if librosa is None or torch is None:
             raise RuntimeError("chatterbox-tts dependencies are not installed")
@@ -98,7 +100,10 @@ class ChatterboxTtsEngine:
         self._device = device
         self._target_sample_rate_hz = target_sample_rate_hz
         self._playback_fn = playback_fn
+        self._play_chunk_bytes = max(2, play_chunk_bytes - (play_chunk_bytes % 2))
         self._min_prompt_seconds = min_prompt_seconds
+        self._play_streams: dict[str, EspPlayStream] = {}
+        self._play_streams_lock = threading.Lock()
         self._voice_wav_path = self._validate_voice_wav(voice_wav_path)
         self._model = None
         self._model_lock = threading.Lock()
@@ -323,6 +328,28 @@ class ChatterboxTtsEngine:
             finally:
                 self._ready_queue.task_done()
 
+    def _play_stream_for(self, job: _TtsJob) -> EspPlayStream:
+        with self._play_streams_lock:
+            stream = self._play_streams.get(job.utterance_id)
+            if stream is None:
+                stream = EspPlayStream(
+                    job.device_ip,
+                    job.device_uid,
+                    self._target_sample_rate_hz,
+                    1,
+                    job.auth_token,
+                    chunk_bytes=self._play_chunk_bytes,
+                    log_prefix="[tts]",
+                )
+                self._play_streams[job.utterance_id] = stream
+            return stream
+
+    def _close_play_stream(self, utterance_id: str) -> None:
+        with self._play_streams_lock:
+            stream = self._play_streams.pop(utterance_id, None)
+        if stream is not None:
+            stream.close()
+
     def _play_result(self, result: _SynthResult) -> None:
         job = result.job
         pcm = result.pcm
@@ -337,15 +364,11 @@ class ChatterboxTtsEngine:
         if self._playback_fn is None:
             print(f"[tts] {job.utterance_id}: playback disabled (no handler)", flush=True)
             return
-        ok = self._playback_fn(
-            job.device_ip,
-            job.device_uid,
-            pcm,
-            sample_rate_hz,
-            channels,
-            job.auth_token,
-            stream_end=job.stream_end,
-        )
+
+        stream = self._play_stream_for(job)
+        ok = stream.append_pcm(pcm, stream_end=job.stream_end)
+        if job.stream_end:
+            self._close_play_stream(job.utterance_id)
         if not ok:
             print(f"[tts] {job.utterance_id}: playback failed", flush=True)
 
@@ -375,4 +398,5 @@ def build_tts_from_args(args, *, playback_fn: PlaybackFn | None) -> ChatterboxTt
         target_sample_rate_hz=getattr(args, "tts_sample_rate_hz", 16000),
         playback_fn=playback_fn,
         voice_wav_path=voice_wav,
+        play_chunk_bytes=getattr(args, "play_chunk_bytes", 12288),
     )

@@ -29,7 +29,10 @@ bool HttpServerService::start(uint16_t port, const ApiContext* context) {
     config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     config.recv_wait_timeout = 15;
     config.send_wait_timeout = 15;
-    config.keep_alive_enable = false;
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 5;
+    config.keep_alive_interval = 5;
+    config.keep_alive_count = 3;
     // LWIP_MAX_SOCKETS=8 → httpd allows at most 5 (3 reserved internally).
     config.max_open_sockets = 5;
 

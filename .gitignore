@@ -50,8 +50,8 @@ sdkconfig.ci
 dist/
 
 # Local secrets (never commit)
-tools/test_server/.env.local
-tools/test_server/.env
+tools/hermes_voice_bridge/.env.local
+tools/hermes_voice_bridge/.env
 
-# Stray audio assets (voice refs live under tools/test_server/voices/)
+# Stray audio assets (voice refs live under tools/hermes_voice_bridge/voices/)
 *.ogg

@@ -30,6 +30,22 @@ const char* localActionName(const char* actionId) {
     return actionId + strlen(kLocalActionPrefix);
 }
 
+const char* subtitleForMode(display::ScreenMode mode) {
+    switch (mode) {
+        case display::ScreenMode::Recording:
+            return "Recording";
+        case display::ScreenMode::Speaking:
+            return "Speaking";
+        case display::ScreenMode::MicOff:
+            return "MICROPHONE OFF";
+        case display::ScreenMode::Listening:
+            return "Listening";
+        case display::ScreenMode::Idle:
+        default:
+            return "Listening";
+    }
+}
+
 }  // namespace
 
 void DisplayService::setUiEventClient(UiEventClient* uiEventClient) {
@@ -67,26 +83,29 @@ bool DisplayService::showScreen(const display::ScreenModel& model) {
     return true;
 }
 
-bool DisplayService::buildIdleScreenModel(const char* deviceName) {
+bool DisplayService::buildMainScreenModel(display::ScreenMode mode, const char* subtitle, bool subtitleAlert) {
     if (m_screenBuffer == nullptr) {
         return false;
     }
 
     display::resetScreenModel(*m_screenBuffer);
-    m_screenBuffer->mode = display::ScreenMode::Idle;
+    m_screenBuffer->mode = mode;
+    m_currentMode = mode;
+    m_screenBuffer->subtitleAlert = subtitleAlert;
 
-    if (deviceName != nullptr) {
-        strncpy(m_idleTitle, deviceName, sizeof(m_idleTitle) - 1);
-        m_idleTitle[sizeof(m_idleTitle) - 1] = '\0';
+    if (m_idleTitle[0] != '\0') {
         strncpy(m_screenBuffer->title, m_idleTitle, sizeof(m_screenBuffer->title) - 1);
+    } else {
+        strncpy(m_screenBuffer->title, "ESP32 Voice", sizeof(m_screenBuffer->title) - 1);
+    }
+    m_screenBuffer->title[sizeof(m_screenBuffer->title) - 1] = '\0';
+
+    if (subtitle != nullptr) {
+        strncpy(m_screenBuffer->subtitle, subtitle, sizeof(m_screenBuffer->subtitle) - 1);
+        m_screenBuffer->subtitle[sizeof(m_screenBuffer->subtitle) - 1] = '\0';
     }
 
     const bool micMuted = m_capture != nullptr && m_capture->isUserMuted();
-    snprintf(
-        m_screenBuffer->subtitle,
-        sizeof(m_screenBuffer->subtitle),
-        "%s",
-        micMuted ? "Mic off — not listening" : "Ready");
 
     uint8_t idx = 0;
 
@@ -104,8 +123,7 @@ bool DisplayService::buildIdleScreenModel(const char* deviceName) {
     strncpy(volumeSlider.id, "volume", sizeof(volumeSlider.id) - 1);
     strncpy(volumeSlider.text, "Volume", sizeof(volumeSlider.text) - 1);
     strncpy(volumeSlider.actionId, "local:volume", sizeof(volumeSlider.actionId) - 1);
-    volumeSlider.progressPercent =
-        m_playback != nullptr ? m_playback->volumePercent() : 80;
+    volumeSlider.progressPercent = m_playback != nullptr ? m_playback->volumePercent() : 80;
 
     display::ScreenComponent& micButton = m_screenBuffer->components[idx++];
     micButton.kind = display::ComponentKind::Button;
@@ -120,8 +138,75 @@ bool DisplayService::buildIdleScreenModel(const char* deviceName) {
     return true;
 }
 
+void DisplayService::refreshAfterLocalControl() {
+    if (m_capture != nullptr && m_capture->isUserMuted()) {
+        showMicOff();
+        return;
+    }
+    if (!buildMainScreenModel(m_currentMode, subtitleForMode(m_currentMode), false)) {
+        return;
+    }
+    showScreen(*m_screenBuffer);
+}
+
 bool DisplayService::showIdleScreen(const char* deviceName) {
-    if (!buildIdleScreenModel(deviceName)) {
+    if (deviceName != nullptr) {
+        strncpy(m_idleTitle, deviceName, sizeof(m_idleTitle) - 1);
+        m_idleTitle[sizeof(m_idleTitle) - 1] = '\0';
+    }
+    if (m_capture != nullptr && m_capture->isUserMuted()) {
+        return showMicOff();
+    }
+    if (!buildMainScreenModel(display::ScreenMode::Listening, subtitleForMode(display::ScreenMode::Listening), false)) {
+        return false;
+    }
+    return showScreen(*m_screenBuffer);
+}
+
+bool DisplayService::showListening() {
+    if (!isReady()) {
+        return false;
+    }
+    if (m_capture != nullptr && m_capture->isUserMuted()) {
+        return showMicOff();
+    }
+    if (!buildMainScreenModel(display::ScreenMode::Listening, subtitleForMode(display::ScreenMode::Listening), false)) {
+        return false;
+    }
+    return showScreen(*m_screenBuffer);
+}
+
+bool DisplayService::showRecording() {
+    if (!isReady()) {
+        return false;
+    }
+    if (m_capture != nullptr && m_capture->isUserMuted()) {
+        return showMicOff();
+    }
+    if (!buildMainScreenModel(display::ScreenMode::Recording, subtitleForMode(display::ScreenMode::Recording), false)) {
+        return false;
+    }
+    return showScreen(*m_screenBuffer);
+}
+
+bool DisplayService::showSpeaking() {
+    if (!isReady()) {
+        return false;
+    }
+    if (!buildMainScreenModel(display::ScreenMode::Speaking, subtitleForMode(display::ScreenMode::Speaking), false)) {
+        return false;
+    }
+    return showScreen(*m_screenBuffer);
+}
+
+bool DisplayService::showMicOff() {
+    if (!isReady()) {
+        return false;
+    }
+    if (!buildMainScreenModel(
+            display::ScreenMode::MicOff,
+            subtitleForMode(display::ScreenMode::MicOff),
+            true)) {
         return false;
     }
     return showScreen(*m_screenBuffer);
@@ -163,7 +248,6 @@ void DisplayService::handleLocalButton(const char* actionId) {
     if (strcmp(action, "mic_toggle") == 0 && m_capture != nullptr) {
         m_capture->setUserMuted(!m_capture->isUserMuted());
         ESP_LOGI(kTag, "mic %s", m_capture->isUserMuted() ? "muted" : "enabled");
-        showIdleScreen(m_idleTitle[0] != '\0' ? m_idleTitle : nullptr);
     }
 }
 
@@ -177,7 +261,7 @@ void DisplayService::handleLocalSlider(const char* actionId, int value) {
         }
         m_playback->setVolumePercent(static_cast<uint8_t>(value));
         ESP_LOGI(kTag, "playback volume=%d%%", value);
-        showIdleScreen(m_idleTitle[0] != '\0' ? m_idleTitle : nullptr);
+        refreshAfterLocalControl();
     }
 }
 

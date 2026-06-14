@@ -8,7 +8,7 @@ import sys
 import wave
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "test_server"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hermes_voice_bridge"))
 
 from esp_playback import stream_pcm_to_esp
 

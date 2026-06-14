@@ -13,16 +13,20 @@
 #include "cJSON.h"
 #include "error_response_factory.hpp"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "http_response_helpers.hpp"
 #include "mbedtls/base64.h"
 
 #include "audio_types.hpp"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// JSON + base64 overhead for 8192-byte PCM chunks.
-static constexpr size_t kRequestBodyMax = 14 * 1024;
+// JSON + base64 overhead for 12288-byte PCM chunks.
+static constexpr size_t kRequestBodyMax = 22 * 1024;
 static constexpr size_t kDecodedPcmMax = audio::kMaxPlaybackBytes;
+
+static const char* kTag = "play_route";
 
 namespace {
 
@@ -174,6 +178,7 @@ bool PlayRoute::registerRoutes(httpd_handle_t server, const ApiContext* context)
 }
 
 esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
+    const int64_t t0Us = esp_timer_get_time();
     auto* context = static_cast<ApiContext*>(req->user_ctx);
     if (!lockPlayBuffers(pdMS_TO_TICKS(100))) {
         ErrorResponseFactory errors;
@@ -264,8 +269,8 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
     }
 
     const size_t b64Len = strlen(pcmNode->valuestring);
-    size_t decodedMax = (b64Len * 3) / 4 + 4;
-    if (decodedMax > kDecodedPcmMax) {
+    const size_t maxB64Len = ((kDecodedPcmMax + 2) / 3) * 4;
+    if (b64Len > maxB64Len) {
         ErrorResponseFactory errors;
         char errBody[256] = {};
         errors.build("INVALID_REQUEST", "pcm_b64 payload too large", false, requestId, errBody, sizeof(errBody));
@@ -311,6 +316,12 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
         char errBody[256] = {};
         errors.build("UNAVAILABLE", "Playback queue full", true, requestId, errBody, sizeof(errBody));
         return sendJsonResponse(req, 503, errBody);
+    }
+
+    const int64_t elapsedMs = (esp_timer_get_time() - t0Us) / 1000;
+    if (elapsedMs > 80) {
+        ESP_LOGW(kTag, "play chunk slow %lld ms (pcm=%u)", static_cast<long long>(elapsedMs),
+                 static_cast<unsigned>(decodedLen));
     }
 
     return sendOk(req, requestId, commandId, ringUsed, ringFree, ringCapacity);

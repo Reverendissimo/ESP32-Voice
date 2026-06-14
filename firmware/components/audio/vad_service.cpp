@@ -64,3 +64,8 @@ audio::VadEventType VadService::processFrame(const int16_t* samples, size_t samp
 bool VadService::isInSpeech() const {
     return m_inSpeech;
 }
+
+void VadService::reset() {
+    m_inSpeech = false;
+    m_silenceMs = 0;
+}

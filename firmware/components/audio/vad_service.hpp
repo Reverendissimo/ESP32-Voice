@@ -37,6 +37,8 @@ public:
 
     bool isInSpeech() const;
 
+    void reset();
+
 private:
     bool isSpeechEnergy(uint32_t energy) const;
 

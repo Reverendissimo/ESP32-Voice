@@ -450,6 +450,16 @@ bool AudioUploadService::postFinalizeJson(const char* body) {
     return true;
 }
 
+bool AudioUploadService::sendOpenStreamJob(const UploadJob& job) {
+    if (m_streamBroken) {
+        return false;
+    }
+    if (m_streamOpen) {
+        return true;
+    }
+    return openStream(job.utteranceId, job.sessionId);
+}
+
 bool AudioUploadService::sendChunkJob(UploadJob& job) {
     if (job.poolSlot < 0 || job.pcmLen == 0) {
         freeJobPcm(job);
@@ -564,6 +574,8 @@ void AudioUploadService::runUploadLoop() {
 
         if (job.type == JobType::Chunk) {
             sendChunkJob(job);
+        } else if (job.type == JobType::OpenStream) {
+            sendOpenStreamJob(job);
         } else {
             sendFinalizeJob(job);
             m_activeUtteranceId[0] = '\0';
@@ -595,15 +607,44 @@ bool AudioUploadService::startUtterance(const char* utteranceId, const char* ses
     return true;
 }
 
-bool AudioUploadService::queuePcmJob(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen) {
+bool AudioUploadService::ensureStreamOpen(const char* utteranceId, const char* sessionId) {
+    if (!m_running || !isConfigured() || m_queue == nullptr) {
+        return false;
+    }
+    if (m_streamOpen) {
+        return true;
+    }
+    if (utteranceId == nullptr || sessionId == nullptr) {
+        return false;
+    }
+
+    UploadJob job = {};
+    job.type = JobType::OpenStream;
+    strncpy(job.utteranceId, utteranceId, sizeof(job.utteranceId) - 1);
+    strncpy(job.sessionId, sessionId, sizeof(job.sessionId) - 1);
+    job.poolSlot = -1;
+
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        if (xQueueSendToFront(static_cast<QueueHandle_t>(m_queue), &job, pdMS_TO_TICKS(25)) == pdTRUE) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    ESP_LOGW(kTag, "ensureStreamOpen queue timeout");
+    return false;
+}
+
+bool AudioUploadService::tryQueuePcmJob(
+    const char* utteranceId,
+    const char* sessionId,
+    const uint8_t* pcm,
+    size_t pcmLen) {
     if (pcm == nullptr || pcmLen == 0 || pcmLen > audio::kUploadBatchBytes || m_queue == nullptr) {
         return false;
     }
 
     const int slot = acquirePoolSlot();
     if (slot < 0) {
-        ++m_chunksDropped;
-        ESP_LOGW(kTag, "chunk pool full, dropping chunk");
         return false;
     }
 
@@ -624,24 +665,58 @@ bool AudioUploadService::queuePcmJob(const char* utteranceId, const char* sessio
 
     if (xQueueSend(static_cast<QueueHandle_t>(m_queue), &job, pdMS_TO_TICKS(50)) != pdTRUE) {
         freeJobPcm(job);
-        ++m_chunksDropped;
-        ESP_LOGW(kTag, "upload queue full, dropping chunk");
         return false;
     }
     ++m_chunksQueued;
     return true;
 }
 
-bool AudioUploadService::flushBatch(const char* utteranceId, const char* sessionId) {
+bool AudioUploadService::queuePcmJob(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen) {
+    if (tryQueuePcmJob(utteranceId, sessionId, pcm, pcmLen)) {
+        return true;
+    }
+    ++m_chunksDropped;
+    ESP_LOGW(kTag, "chunk enqueue failed pcm_bytes=%u", static_cast<unsigned>(pcmLen));
+    return false;
+}
+
+bool AudioUploadService::queuePcmJobReliable(
+    const char* utteranceId,
+    const char* sessionId,
+    const uint8_t* pcm,
+    size_t pcmLen) {
+    constexpr int kMaxAttempts = 400;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (tryQueuePcmJob(utteranceId, sessionId, pcm, pcmLen)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+    ++m_chunksDropped;
+    ESP_LOGW(kTag, "reliable enqueue gave up pcm_bytes=%u", static_cast<unsigned>(pcmLen));
+    return false;
+}
+
+bool AudioUploadService::flushBatch(const char* utteranceId, const char* sessionId, bool reliable) {
     if (m_batchLen == 0 || m_batchBuffer == nullptr) {
         return true;
     }
-    const bool ok = queuePcmJob(utteranceId, sessionId, m_batchBuffer, m_batchLen);
+    const bool ok = reliable ? queuePcmJobReliable(utteranceId, sessionId, m_batchBuffer, m_batchLen)
+                             : queuePcmJob(utteranceId, sessionId, m_batchBuffer, m_batchLen);
     resetBatch();
     return ok;
 }
 
-bool AudioUploadService::uploadChunk(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen) {
+bool AudioUploadService::flushPendingBatch(const char* utteranceId, const char* sessionId, bool reliable) {
+    return flushBatch(utteranceId, sessionId, reliable);
+}
+
+bool AudioUploadService::uploadChunk(
+    const char* utteranceId,
+    const char* sessionId,
+    const uint8_t* pcm,
+    size_t pcmLen,
+    bool reliable) {
     if (!m_running || !isConfigured() || pcm == nullptr || pcmLen == 0 || m_batchBuffer == nullptr) {
         return false;
     }
@@ -649,7 +724,7 @@ bool AudioUploadService::uploadChunk(const char* utteranceId, const char* sessio
         return false;
     }
     if (m_batchLen + pcmLen > audio::kUploadBatchBytes) {
-        if (!flushBatch(utteranceId, sessionId)) {
+        if (!flushBatch(utteranceId, sessionId, reliable)) {
             return false;
         }
     }
@@ -658,7 +733,7 @@ bool AudioUploadService::uploadChunk(const char* utteranceId, const char* sessio
     m_batchLen += pcmLen;
 
     if (m_batchLen >= audio::kUploadBatchBytes) {
-        return flushBatch(utteranceId, sessionId);
+        return flushBatch(utteranceId, sessionId, reliable);
     }
     return true;
 }

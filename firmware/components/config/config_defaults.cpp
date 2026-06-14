@@ -20,7 +20,7 @@ AppConfig makeDefaults() {
 
     defaults.vad.speechStartThreshold = 25;
     defaults.vad.silenceFinalizeMs = 1200;
-    defaults.vad.preRollPaddingMs = 1000;
+    defaults.vad.preRollPaddingMs = 2000;
     defaults.vad.postRollPaddingMs = 1000;
 
     defaults.audio.sampleRateHz = 16000;

@@ -31,7 +31,14 @@ public:
     void stop();
 
     bool startUtterance(const char* utteranceId, const char* sessionId);
-    bool uploadChunk(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen);
+    bool ensureStreamOpen(const char* utteranceId, const char* sessionId);
+    bool uploadChunk(
+        const char* utteranceId,
+        const char* sessionId,
+        const uint8_t* pcm,
+        size_t pcmLen,
+        bool reliable = false);
+    bool flushPendingBatch(const char* utteranceId, const char* sessionId, bool reliable = false);
     bool finalizeUtterance(
         const char* utteranceId,
         const char* sessionId,
@@ -48,6 +55,7 @@ public:
 
 private:
     enum class JobType : uint8_t {
+        OpenStream,
         Chunk,
         Finalize,
     };
@@ -67,8 +75,10 @@ private:
     static void uploadTask(void* arg);
     void runUploadLoop();
     bool postFinalizeJson(const char* body);
+    bool tryQueuePcmJob(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen);
     bool queuePcmJob(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen);
-    bool flushBatch(const char* utteranceId, const char* sessionId);
+    bool queuePcmJobReliable(const char* utteranceId, const char* sessionId, const uint8_t* pcm, size_t pcmLen);
+    bool flushBatch(const char* utteranceId, const char* sessionId, bool reliable = false);
     int acquirePoolSlot();
     void releasePoolSlot(int slot);
     uint8_t* poolSlotData(int slot);
@@ -78,6 +88,7 @@ private:
     bool writeStream(const uint8_t* pcm, size_t pcmLen);
     bool closeStream();
     void abortStream();
+    bool sendOpenStreamJob(const UploadJob& job);
     bool sendChunkJob(UploadJob& job);
     bool sendFinalizeJob(const UploadJob& job);
     void resetBatch();

@@ -90,6 +90,20 @@ idf.py -p /dev/ttyACM0 flash monitor
 
 Host tests: `.venv/bin/pytest` (hardware tests are marked `@pytest.mark.hardware`).
 
+## Hermes-Voice-Bridge
+
+Backend server that bridges the ESP32 voice terminal to ASR, Hermes, and TTS:
+
+```
+ESP32 mic upload → faster-whisper → Hermes agent → Chatterbox TTS → ESP playback
+```
+
+```bash
+tools/hermes_voice_bridge/run.sh --host 0.0.0.0 --port 8080
+```
+
+Also hosts OTA firmware (`GET /api/v1/firmware/manifest.json`). After `idf.py build`, run `tools/publish_firmware.sh` to deploy a new binary without restarting the bridge.
+
 ## Implementation order
 
 1. Platform skeleton, config, Wi-Fi, time sync, identity

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Minimal REST server for ESP32-Voice speech upload testing.
+Hermes-Voice-Bridge — backend server for the ESP32-Voice terminal.
+
+Connects ESP32 speech upload → faster-whisper ASR → Hermes agent → Chatterbox TTS → ESP playback.
 
 Endpoints (under --prefix, default /api/v1):
   POST /speech/stream    - receive streamed PCM (A3 binary chunked HTTP)
@@ -262,7 +264,7 @@ def echo_playback(
     channels: int,
     auth_token: str,
     *,
-    chunk_bytes: int = 8192,
+    chunk_bytes: int = 8184,
     stream_end: bool = True,
 ) -> bool:
     return stream_pcm_to_esp(
@@ -393,7 +395,7 @@ class ServerConfig:
     echo_enabled: bool = False
     echo_device_ip: str = ""
     echo_auth_token: str = ""
-    play_chunk_bytes: int = 8192
+    play_chunk_bytes: int = 12288
     transcriber: WhisperTranscriber | None = None
     tts: ChatterboxTtsEngine | None = None
     hermes: HermesClient | None = None
@@ -552,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
         if self._route_path() == "/":
             status = self.cfg.store.status()
             lines = [
-                "ESP32-Voice test server",
+                "Hermes-Voice-Bridge",
                 "",
                 f"POST {self.cfg.prefix}/speech/stream",
                 f"POST {self.cfg.prefix}/speech",
@@ -775,14 +777,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ESP32-Voice speech test server")
+    parser = argparse.ArgumentParser(description="Hermes-Voice-Bridge backend server")
     parser.add_argument("--host", default="0.0.0.0", help="Listen address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8080, help="Listen port (default: 8080)")
     parser.add_argument("--prefix", default="/api/v1", help="URL prefix (default: /api/v1)")
     parser.add_argument(
         "--recordings-dir",
         default=None,
-        help="Directory for WAV files (default: tools/test_server/recordings)",
+        help="Directory for WAV files (default: tools/hermes_voice_bridge/recordings)",
     )
     parser.add_argument(
         "--echo-on",
@@ -798,8 +800,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--play-chunk-bytes",
         type=int,
-        default=8192,
-        help="PCM bytes per /play POST (default: 8192, ~256 ms @ 16 kHz)",
+        default=12288,
+        help="PCM bytes per /play POST (default: 12288, ~384 ms @ 16 kHz)",
     )
     parser.add_argument(
         "--no-hermes-stream",
@@ -1075,6 +1077,7 @@ def main() -> int:
     server.cfg = cfg  # type: ignore[attr-defined]
     server.no_streaming_asr = args.no_streaming_asr  # type: ignore[attr-defined]
 
+    print("Hermes-Voice-Bridge", flush=True)
     print(f"Listening on http://{args.host}:{args.port}{cfg.prefix}", flush=True)
     print("Protocol A3 (primary):", flush=True)
     print(f"  POST {cfg.prefix}/speech/stream  (binary PCM, chunked HTTP body + X-* headers)", flush=True)

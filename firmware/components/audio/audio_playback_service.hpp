@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "audio_activity.hpp"
 #include "audio_types.hpp"
 #include "esp_codec_dev.h"
 #include "freertos/FreeRTOS.h"
@@ -49,6 +50,7 @@ public:
     size_t ringCapacityBytes() const;
     void setVolumePercent(uint8_t percent);
     uint8_t volumePercent() const;
+    void setActivityCallbacks(const AudioActivityCallbacks& callbacks);
 
 private:
     static void playbackTask(void* arg);
@@ -60,6 +62,7 @@ private:
     void drainSpeaker(esp_codec_dev_handle_t speaker);
     void reopenMicrophone();
     void onPlaybackIdle();
+    void notifyActivity(AudioActivity activity);
 
     Box3AudioBoard* m_board = nullptr;
     AudioCaptureService* m_capture = nullptr;
@@ -70,6 +73,7 @@ private:
     bool m_expectMoreChunks = false;
     void* m_taskHandle = nullptr;
     uint8_t* m_ring = nullptr;
+    uint8_t* m_ioBuffer = nullptr;
     size_t m_ringCapacity = 0;
     size_t m_ringWritePos = 0;
     size_t m_ringReadPos = 0;
@@ -81,4 +85,6 @@ private:
     bool m_micSuspendedForPlayback = false;
     uint8_t m_volumePercent = audio::kDefaultPlaybackVolumePercent;
     float m_pcmGain = 2.5f;
+    AudioActivityCallbacks m_activity = {};
+    uint32_t m_streamWaitPolls = 0;
 };

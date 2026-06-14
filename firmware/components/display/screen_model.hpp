@@ -17,6 +17,9 @@ constexpr size_t kMaxListItems = 8;
 enum class ScreenMode : uint8_t {
     Idle,
     Listening,
+    Recording,
+    Speaking,
+    MicOff,
     Thinking,
     Message,
     ChoiceList,
@@ -56,6 +59,7 @@ struct ScreenModel {
     ScreenMode mode = ScreenMode::Unknown;
     char title[kMaxTextLen];
     char subtitle[kMaxTextLen];
+    bool subtitleAlert = false;
     uint8_t componentCount = 0;
     ScreenComponent components[kMaxComponents];
 

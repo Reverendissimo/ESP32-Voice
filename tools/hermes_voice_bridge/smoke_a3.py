@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Smoke-test protocol A3 against a running test server.
+Smoke-test protocol A3 against a running Hermes-Voice-Bridge instance.
 
 Simulates the ESP32 flow:
   1. POST /speech/stream  — chunked binary PCM + metadata headers
   2. POST /speech/finalize — JSON metadata
 
 Usage:
-  ./tools/test_server/run.sh &
-  python3 tools/test_server/smoke_a3.py --host 127.0.0.1 --port 8080
+  ./tools/hermes_voice_bridge/run.sh &
+  python3 tools/hermes_voice_bridge/smoke_a3.py --host 127.0.0.1 --port 8080
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def make_test_pcm(seconds: float, sample_rate: int, channels: int) -> bytes:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Smoke-test A3 speech stream against test server")
+    parser = argparse.ArgumentParser(description="Smoke-test A3 speech stream against Hermes-Voice-Bridge")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--prefix", default="/api/v1")

@@ -152,13 +152,56 @@ bool AudioCaptureService::isRunning() const {
 }
 
 void AudioCaptureService::setPlaybackPaused(bool paused) {
+    const bool wasPaused = m_playbackPaused;
     m_playbackPaused = paused;
+    if (wasPaused && !paused) {
+        if (m_vad != nullptr) {
+            m_vad->reset();
+        }
+        ensureMicrophoneReady();
+    }
+}
+
+bool AudioCaptureService::isPlaybackPaused() const {
+    return m_playbackPaused;
+}
+
+void AudioCaptureService::setActivityCallbacks(const AudioActivityCallbacks& callbacks) {
+    m_activity = callbacks;
+}
+
+void AudioCaptureService::notifyActivity(AudioActivity activity) {
+    if (m_activity.onActivity != nullptr) {
+        m_activity.onActivity(m_activity.context, activity);
+    }
+}
+
+void AudioCaptureService::ensureMicrophoneReady() {
+    if (m_board == nullptr || m_playbackPaused || m_userMuted) {
+        return;
+    }
+    if (m_board->isMicrophoneOpen()) {
+        return;
+    }
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        if (m_board->openMicrophone(m_audio.sampleRateHz, m_audio.channels)) {
+            ESP_LOGI(kTag, "mic reopened for capture");
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(kTag, "mic reopen failed in capture loop");
 }
 
 void AudioCaptureService::setUserMuted(bool muted) {
     m_userMuted = muted;
     if (muted && m_utteranceFsm != nullptr && m_utteranceFsm->isStreaming()) {
         m_utteranceFsm->cancelActive();
+    }
+    if (muted) {
+        notifyActivity(AudioActivity::MicOff);
+    } else {
+        notifyActivity(AudioActivity::Listening);
     }
 }
 
@@ -203,17 +246,36 @@ void AudioCaptureService::flushPreRoll() {
         return;
     }
 
+    const char* utteranceId = m_utteranceFsm->utteranceId();
+    const char* sessionId = m_utteranceFsm->sessionId();
+    m_upload->ensureStreamOpen(utteranceId, sessionId);
+
     const size_t frameCount = m_preRollFull ? m_preRollFrameCount : m_preRollWriteIdx;
     const size_t startIdx = m_preRollFull ? m_preRollWriteIdx : 0;
+    size_t dropped = 0;
     for (size_t i = 0; i < frameCount; ++i) {
         const size_t idx = (startIdx + i) % m_preRollFrameCount;
-        m_upload->uploadChunk(
-            m_utteranceFsm->utteranceId(),
-            m_utteranceFsm->sessionId(),
-            reinterpret_cast<const uint8_t*>(m_preRollRing[idx].samples),
-            audio::kBytesPerFrame);
+        if (!m_upload->uploadChunk(
+                utteranceId,
+                sessionId,
+                reinterpret_cast<const uint8_t*>(m_preRollRing[idx].samples),
+                audio::kBytesPerFrame,
+                true)) {
+            ++dropped;
+        }
     }
-    ESP_LOGI(kTag, "pre-roll flushed frames=%u", static_cast<unsigned>(frameCount));
+    if (!m_upload->flushPendingBatch(utteranceId, sessionId, true)) {
+        ++dropped;
+    }
+    if (dropped > 0) {
+        ESP_LOGW(
+            kTag,
+            "pre-roll flush incomplete frames=%u dropped=%u",
+            static_cast<unsigned>(frameCount),
+            static_cast<unsigned>(dropped));
+    } else {
+        ESP_LOGI(kTag, "pre-roll flushed frames=%u", static_cast<unsigned>(frameCount));
+    }
 }
 
 void AudioCaptureService::captureTask(void* arg) {
@@ -245,6 +307,12 @@ void AudioCaptureService::runCaptureLoop() {
 
     while (m_running) {
         if (m_playbackPaused || m_userMuted) {
+            vTaskDelay(pdMS_TO_TICKS(audio::kFrameDurationMs));
+            continue;
+        }
+
+        ensureMicrophoneReady();
+        if (m_board != nullptr && !m_board->isMicrophoneOpen()) {
             vTaskDelay(pdMS_TO_TICKS(audio::kFrameDurationMs));
             continue;
         }
@@ -309,9 +377,15 @@ void AudioCaptureService::runCaptureLoop() {
 
         if (event == audio::VadEventType::SpeechStart && m_utteranceFsm->state() == UtteranceState::Idle) {
             m_utteranceFsm->handleVadEvent(event, audio::kFrameDurationMs);
+            if (!m_userMuted) {
+                notifyActivity(AudioActivity::Recording);
+            }
             flushPreRoll();
         } else {
             m_utteranceFsm->handleVadEvent(event, audio::kFrameDurationMs);
+            if (event == audio::VadEventType::SpeechEnd && !m_userMuted && !m_playbackPaused) {
+                notifyActivity(AudioActivity::Listening);
+            }
         }
         m_utteranceFsm->onFrameTick(audio::kFrameDurationMs);
 

@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "audio_activity.hpp"
 #include "audio_types.hpp"
 #include "config_models.hpp"
 
@@ -58,8 +59,10 @@ public:
     bool isRunning() const;
 
     void setPlaybackPaused(bool paused);
+    bool isPlaybackPaused() const;
     void setUserMuted(bool muted);
     bool isUserMuted() const;
+    void setActivityCallbacks(const AudioActivityCallbacks& callbacks);
 
     uint32_t lastFrameEnergy() const;
     uint32_t peakFrameEnergy() const;
@@ -92,8 +95,11 @@ private:
     size_t m_preRollFrameCount = 0;
     volatile bool m_playbackPaused = false;
     volatile bool m_userMuted = false;
+    AudioActivityCallbacks m_activity = {};
 
     void updatePreRollCapacity();
     void pushPreRoll(const audio::PcmFrame& frame);
     void flushPreRoll();
+    void ensureMicrophoneReady();
+    void notifyActivity(AudioActivity activity);
 };

@@ -46,7 +46,7 @@ bool Box3AudioBoard::initialize() {
         ESP_LOGE(kTag, "microphone codec init failed");
         return false;
     }
-    esp_codec_dev_set_in_gain(m_microphone, 50.0);
+    esp_codec_dev_set_in_gain(m_microphone, 60.0);
 
     m_initialized = true;
     ESP_LOGI(kTag, "BOX-3 audio ready");

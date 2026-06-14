@@ -18,10 +18,11 @@ static const char* kTag = "audio_playback";
 
 namespace {
 
-constexpr size_t kCodecWriteBytes = 2048;
+constexpr size_t kCodecWriteBytes = 4096;
 constexpr int kEnqueueTimeoutMs = 150;
 constexpr int kPlaybackTaskPriority = 7;
 constexpr uint32_t kTailPollsBeforeDrain = 50;
+constexpr uint32_t kStreamTailTimeoutPolls = 500;
 
 void amplifyPcm(int16_t* samples, size_t count, float gain) {
     for (size_t i = 0; i < count; ++i) {
@@ -63,6 +64,16 @@ uint8_t AudioPlaybackService::volumePercent() const {
     return m_volumePercent;
 }
 
+void AudioPlaybackService::setActivityCallbacks(const AudioActivityCallbacks& callbacks) {
+    m_activity = callbacks;
+}
+
+void AudioPlaybackService::notifyActivity(AudioActivity activity) {
+    if (m_activity.onActivity != nullptr) {
+        m_activity.onActivity(m_activity.context, activity);
+    }
+}
+
 void AudioPlaybackService::configure(
     Box3AudioBoard* board,
     uint16_t defaultSampleRateHz,
@@ -87,8 +98,11 @@ bool AudioPlaybackService::start() {
     if (m_ring == nullptr) {
         m_ring = static_cast<uint8_t*>(heap_caps_malloc(m_ringCapacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     }
-    if (m_ring == nullptr) {
-        ESP_LOGE(kTag, "playback ring PSRAM alloc failed (%u bytes)", static_cast<unsigned>(m_ringCapacity));
+    if (m_ioBuffer == nullptr) {
+        m_ioBuffer = static_cast<uint8_t*>(heap_caps_malloc(kCodecWriteBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (m_ring == nullptr || m_ioBuffer == nullptr) {
+        ESP_LOGE(kTag, "playback PSRAM alloc failed (ring=%u io=%u)", static_cast<unsigned>(m_ringCapacity), static_cast<unsigned>(kCodecWriteBytes));
         return false;
     }
     m_ringWritePos = 0;
@@ -108,7 +122,7 @@ bool AudioPlaybackService::start() {
     const BaseType_t created = xTaskCreate(
         playbackTask,
         "audio_play",
-        4096,
+        8192,
         this,
         kPlaybackTaskPriority,
         reinterpret_cast<TaskHandle_t*>(&m_taskHandle));
@@ -217,10 +231,13 @@ void AudioPlaybackService::wakePlaybackTask() {
 
 void AudioPlaybackService::preparePlayback(uint16_t sampleRateHz, uint8_t channels) {
     setCapturePaused(m_capture, true);
-    if (m_board != nullptr && m_board->isMicrophoneOpen()) {
-        m_board->closeMicrophone();
+    if (m_board != nullptr) {
+        if (m_board->isMicrophoneOpen()) {
+            m_board->closeMicrophone();
+        }
         m_micSuspendedForPlayback = true;
     }
+    notifyActivity(AudioActivity::Speaking);
     if (!m_streamFormatSet) {
         m_streamSampleRateHz = sampleRateHz;
         m_streamChannels = channels;
@@ -341,15 +358,21 @@ void AudioPlaybackService::drainSpeaker(esp_codec_dev_handle_t speaker) {
 }
 
 void AudioPlaybackService::reopenMicrophone() {
-    if (m_board == nullptr || !m_micSuspendedForPlayback || m_board->isMicrophoneOpen()) {
+    if (m_board == nullptr) {
         return;
     }
-    for (int attempt = 0; attempt < 4; ++attempt) {
+    if (m_board->isMicrophoneOpen()) {
+        m_micSuspendedForPlayback = false;
+        return;
+    }
+
+    for (int attempt = 0; attempt < 8; ++attempt) {
         if (m_board->openMicrophone(m_defaultSampleRateHz, m_defaultChannels)) {
             m_micSuspendedForPlayback = false;
+            ESP_LOGI(kTag, "mic reopened after playback");
             return;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(80));
     }
     ESP_LOGW(kTag, "mic reopen failed after playback");
     m_micSuspendedForPlayback = false;
@@ -360,6 +383,8 @@ void AudioPlaybackService::onPlaybackIdle() {
         setCapturePaused(m_capture, false);
         m_expectMoreChunks = false;
         m_micSuspendedForPlayback = false;
+        m_streamWaitPolls = 0;
+        notifyActivity(AudioActivity::Listening);
         return;
     }
     if (m_board->isSpeakerOpen()) {
@@ -372,6 +397,8 @@ void AudioPlaybackService::onPlaybackIdle() {
     setCapturePaused(m_capture, false);
     m_streamFormatSet = false;
     m_expectMoreChunks = false;
+    m_streamWaitPolls = 0;
+    notifyActivity(AudioActivity::Listening);
     ESP_LOGI(kTag, "playback idle — mic resumed");
 }
 
@@ -384,7 +411,6 @@ void AudioPlaybackService::playbackTask(void* arg) {
 }
 
 void AudioPlaybackService::runPlaybackLoop() {
-    uint8_t ioBuffer[kCodecWriteBytes] = {};
     uint32_t idlePolls = 0;
 
     while (m_running) {
@@ -392,8 +418,15 @@ void AudioPlaybackService::runPlaybackLoop() {
         if (pending == 0) {
             if (m_playing) {
                 if (m_expectMoreChunks) {
-                    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
-                    continue;
+                    ++m_streamWaitPolls;
+                    if (m_streamWaitPolls >= kStreamTailTimeoutPolls) {
+                        ESP_LOGW(kTag, "stream tail timeout — forcing playback idle");
+                        m_expectMoreChunks = false;
+                        m_streamWaitPolls = 0;
+                    } else {
+                        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+                        continue;
+                    }
                 }
                 ++idlePolls;
                 if (idlePolls >= kTailPollsBeforeDrain) {
@@ -404,13 +437,21 @@ void AudioPlaybackService::runPlaybackLoop() {
                     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
                 }
             } else {
-                (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+                m_streamWaitPolls = 0;
+                (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
             }
             continue;
         }
         idlePolls = 0;
+        m_streamWaitPolls = 0;
 
         if (!m_playing) {
+            const size_t prefetch =
+                m_expectMoreChunks ? audio::kPlaybackPrefetchBytes : 0;
+            if (m_expectMoreChunks && pending < prefetch) {
+                (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+                continue;
+            }
             m_playing = true;
             if (!m_board->openSpeaker(m_streamSampleRateHz, m_streamChannels)) {
                 ESP_LOGW(kTag, "speaker open failed");
@@ -427,14 +468,14 @@ void AudioPlaybackService::runPlaybackLoop() {
         }
 
         const size_t toRead = (pending > kCodecWriteBytes) ? kCodecWriteBytes : pending;
-        const size_t got = readRing(ioBuffer, toRead);
+        const size_t got = readRing(m_ioBuffer, toRead);
         if (got == 0) {
             continue;
         }
 
         const int writeRc = esp_codec_dev_write(
             m_board->speaker(),
-            ioBuffer,
+            m_ioBuffer,
             static_cast<int>(got));
         if (writeRc != ESP_CODEC_DEV_OK) {
             ESP_LOGW(kTag, "speaker write failed rc=%d", writeRc);

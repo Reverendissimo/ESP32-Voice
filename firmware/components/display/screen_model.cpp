@@ -17,6 +17,12 @@ const char* screenModeToString(ScreenMode mode) {
             return "idle";
         case ScreenMode::Listening:
             return "listening";
+        case ScreenMode::Recording:
+            return "recording";
+        case ScreenMode::Speaking:
+            return "speaking";
+        case ScreenMode::MicOff:
+            return "mic_off";
         case ScreenMode::Thinking:
             return "thinking";
         case ScreenMode::Message:
@@ -44,6 +50,18 @@ bool screenModeFromString(const char* value, ScreenMode& out) {
     }
     if (strcmp(value, "listening") == 0) {
         out = ScreenMode::Listening;
+        return true;
+    }
+    if (strcmp(value, "recording") == 0) {
+        out = ScreenMode::Recording;
+        return true;
+    }
+    if (strcmp(value, "speaking") == 0) {
+        out = ScreenMode::Speaking;
+        return true;
+    }
+    if (strcmp(value, "mic_off") == 0) {
+        out = ScreenMode::MicOff;
         return true;
     }
     if (strcmp(value, "thinking") == 0) {

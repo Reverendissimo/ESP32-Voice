@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 
 #include "config_callbacks.hpp"
+#include "audio_activity.hpp"
 #include "esp_app_desc.h"
 #include "screen_model.hpp"
 #include "esp_timer.h"
@@ -26,6 +27,27 @@ static const char* kTag = "app_bootstrap";
 static void reloadRuntimeConfigTrampoline(void* context) {
     if (context != nullptr) {
         static_cast<AppBootstrap*>(context)->reloadRuntimeConfig();
+    }
+}
+
+static void onAudioActivity(void* context, AudioActivity activity) {
+    auto* display = static_cast<DisplayService*>(context);
+    if (display == nullptr) {
+        return;
+    }
+    switch (activity) {
+        case AudioActivity::Listening:
+            display->showListening();
+            break;
+        case AudioActivity::Recording:
+            display->showRecording();
+            break;
+        case AudioActivity::Speaking:
+            display->showSpeaking();
+            break;
+        case AudioActivity::MicOff:
+            display->showMicOff();
+            break;
     }
 }
 
@@ -121,6 +143,10 @@ bool AppBootstrap::startAudioPipeline() {
         ESP_LOGW(kTag, "capture service failed to start");
     }
 
+    const AudioActivityCallbacks activityCallbacks = {onAudioActivity, &m_displayService};
+    m_audioCaptureService.setActivityCallbacks(activityCallbacks);
+    m_audioPlaybackService.setActivityCallbacks(activityCallbacks);
+
     if (m_audioUploadService.isConfigured()) {
         ESP_LOGI(
             kTag,
@@ -169,8 +195,9 @@ bool AppBootstrap::showDeferredIdleScreen() {
     }
 
     const config::AppConfig& activeConfig = m_configManager.active();
-    if (!m_displayService.showIdleScreen(activeConfig.identity.deviceName)) {
-        ESP_LOGW(kTag, "idle screen render failed");
+    (void)m_displayService.showIdleScreen(activeConfig.identity.deviceName);
+    if (!m_displayService.showListening()) {
+        ESP_LOGW(kTag, "listening screen render failed");
         return false;
     }
     return true;

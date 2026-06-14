@@ -29,15 +29,21 @@ public:
     bool showScreen(const display::ScreenModel& model);
     bool showSimpleScreen(display::ScreenMode mode, const char* title, const char* subtitle);
     bool showIdleScreen(const char* deviceName);
+    bool showListening();
+    bool showRecording();
+    bool showSpeaking();
+    bool showMicOff();
     bool showParsedScreen(const cJSON* screenObject, char* errorOut, size_t errorOutLen);
 
     static void onButtonPressed(const char* componentId, const char* actionId, void* context);
     static void onSliderChanged(const char* componentId, const char* actionId, int value, void* context);
 
 private:
-    bool buildIdleScreenModel(const char* deviceName);
     void handleLocalButton(const char* actionId);
     void handleLocalSlider(const char* actionId, int value);
+
+    bool buildMainScreenModel(display::ScreenMode mode, const char* subtitle, bool subtitleAlert = false);
+    void refreshAfterLocalControl();
 
     UiEventClient* m_uiEventClient = nullptr;
     AudioCaptureService* m_capture = nullptr;
@@ -46,4 +52,5 @@ private:
     LvglRenderer m_renderer;
     display::ScreenModel* m_screenBuffer = nullptr;
     char m_idleTitle[display::kMaxTextLen] = {};
+    display::ScreenMode m_currentMode = display::ScreenMode::Listening;
 };

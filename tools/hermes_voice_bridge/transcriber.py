@@ -212,11 +212,25 @@ class WhisperTranscriber:
     def _pcm_to_audio(self, pcm: bytes) -> np.ndarray:
         if not pcm:
             return np.array([], dtype=np.float32)
-        return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        return self._normalize_for_whisper(audio)
+
+    def _normalize_for_whisper(self, audio: np.ndarray, target_peak: float = 0.35) -> np.ndarray:
+        """Boost quiet BOX mic captures so Whisper sees usable levels."""
+        if audio.size == 0:
+            return audio
+        peak = float(np.max(np.abs(audio)))
+        if peak < 1e-5:
+            return audio
+        if peak >= target_peak:
+            return audio
+        gain = target_peak / peak
+        return np.clip(audio * gain, -1.0, 1.0)
 
     def _transcribe_pcm(self, pcm: bytes, sample_rate_hz: int) -> tuple[list, object, float]:
         model = self._ensure_model()
         audio = self._pcm_to_audio(pcm)
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         t0 = time.time()
         kwargs: dict = {
             "beam_size": self._beam_size,
@@ -226,6 +240,11 @@ class WhisperTranscriber:
             kwargs["language"] = self._language
         segments, info = model.transcribe(audio, **kwargs)
         segment_list = list(segments)
+        if peak < 0.12 and audio.size:
+            print(
+                f"[asr] note: input peak={peak:.3f} after normalize — check mic gain / dropped upload chunks",
+                flush=True,
+            )
         return segment_list, info, time.time() - t0
 
     def _emit_new_segments(
