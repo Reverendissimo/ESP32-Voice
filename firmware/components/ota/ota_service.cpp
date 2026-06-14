@@ -129,28 +129,18 @@ void OtaService::validateRunningImageOnBoot() {
     }
 }
 
-bool OtaService::resolveManifest(
+bool OtaService::fetchManifestFromUrl(
+    const char* manifestUrl,
     char* firmwareUrl,
     size_t firmwareUrlLen,
     char* versionOut,
     size_t versionOutLen) {
-    if (firmwareUrl == nullptr || firmwareUrlLen == 0) {
+    if (manifestUrl == nullptr || manifestUrl[0] == '\0' || firmwareUrl == nullptr || firmwareUrlLen == 0) {
         return false;
     }
     firmwareUrl[0] = '\0';
     if (versionOut != nullptr && versionOutLen > 0) {
         versionOut[0] = '\0';
-    }
-
-    config::AppConfig config = {};
-    config.ota = m_ota;
-    copyString(config.network.callbackBaseUrl, sizeof(config.network.callbackBaseUrl), m_callbackBaseUrl);
-
-    char manifestUrl[192] = {};
-    config::resolveOtaManifestUrl(config, manifestUrl, sizeof(manifestUrl));
-    if (manifestUrl[0] == '\0') {
-        copyString(m_lastError, sizeof(m_lastError), "OTA manifest URL not configured");
-        return false;
     }
 
     esp_http_client_config_t httpConfig = {};
@@ -221,6 +211,25 @@ bool OtaService::resolveManifest(
     }
     cJSON_Delete(root);
     return firmwareUrl[0] != '\0';
+}
+
+bool OtaService::resolveManifest(
+    char* firmwareUrl,
+    size_t firmwareUrlLen,
+    char* versionOut,
+    size_t versionOutLen) {
+    config::AppConfig config = {};
+    config.ota = m_ota;
+    copyString(config.network.callbackBaseUrl, sizeof(config.network.callbackBaseUrl), m_callbackBaseUrl);
+
+    char manifestUrl[192] = {};
+    config::resolveOtaManifestUrl(config, manifestUrl, sizeof(manifestUrl));
+    if (manifestUrl[0] == '\0') {
+        copyString(m_lastError, sizeof(m_lastError), "OTA manifest URL not configured");
+        return false;
+    }
+
+    return fetchManifestFromUrl(manifestUrl, firmwareUrl, firmwareUrlLen, versionOut, versionOutLen);
 }
 
 bool OtaService::downloadAndInstall(const char* firmwareUrl) {
@@ -357,7 +366,19 @@ void OtaService::runUpdate(const char* firmwareUrl, bool force) {
     char resolvedUrl[256] = {};
     char offeredVersion[32] = {};
     if (firmwareUrl != nullptr && firmwareUrl[0] != '\0') {
-        copyString(resolvedUrl, sizeof(resolvedUrl), firmwareUrl);
+        if (strstr(firmwareUrl, "manifest.json") != nullptr) {
+            if (!fetchManifestFromUrl(
+                    firmwareUrl,
+                    resolvedUrl,
+                    sizeof(resolvedUrl),
+                    offeredVersion,
+                    sizeof(offeredVersion))) {
+                m_state = OtaState::Failed;
+                return;
+            }
+        } else {
+            copyString(resolvedUrl, sizeof(resolvedUrl), firmwareUrl);
+        }
     } else if (!resolveManifest(resolvedUrl, sizeof(resolvedUrl), offeredVersion, sizeof(offeredVersion))) {
         m_state = OtaState::Failed;
         return;

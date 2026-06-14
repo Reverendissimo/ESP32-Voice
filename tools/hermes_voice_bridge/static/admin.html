@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hermes Voice Bridge</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a222c;
+      --border: #2a3544;
+      --text: #e8eef4;
+      --muted: #8fa3b8;
+      --accent: #4fc3f7;
+      --ok: #8bc34a;
+      --warn: #ffb74d;
+      --err: #ff5252;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: #121820;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.9rem; }
+    main { max-width: 960px; margin: 0 auto; padding: 1rem 1.25rem 2rem; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      margin-bottom: 1rem;
+    }
+    section h2 {
+      margin: 0 0 0.75rem;
+      font-size: 1rem;
+      color: var(--accent);
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
+    .label-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      max-width: 100%;
+    }
+    .info-tip {
+      position: relative;
+      display: inline-flex;
+      flex-shrink: 0;
+      cursor: help;
+      color: var(--accent);
+      opacity: 0.75;
+      line-height: 1;
+    }
+    .info-tip:hover,
+    .info-tip:focus-visible {
+      opacity: 1;
+      outline: none;
+    }
+    .tip-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid currentColor;
+      font-size: 0.6rem;
+      font-weight: 700;
+      font-style: italic;
+      font-family: Georgia, "Times New Roman", serif;
+    }
+    .tip-balloon {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%) translateY(4px);
+      width: max-content;
+      max-width: 280px;
+      padding: 0.5rem 0.65rem;
+      border-radius: 8px;
+      background: #1e2a38;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 0.75rem;
+      font-weight: normal;
+      line-height: 1.45;
+      white-space: normal;
+      z-index: 30;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 0.15s, transform 0.15s, visibility 0.15s;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+    }
+    .tip-balloon::after {
+      content: "";
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      margin-left: -6px;
+      border: 6px solid transparent;
+      border-top-color: #1e2a38;
+    }
+    .info-tip:hover .tip-balloon,
+    .info-tip:focus-visible .tip-balloon {
+      opacity: 1;
+      visibility: visible;
+      transform: translateX(-50%) translateY(0);
+    }
+    input, select, textarea {
+      width: 100%;
+      padding: 0.5rem 0.6rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #0d1117;
+      color: var(--text);
+      font: inherit;
+    }
+    textarea { min-height: 120px; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; align-items: center; }
+    button {
+      padding: 0.45rem 0.85rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #243040;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+    }
+    button.primary { background: #1565c0; border-color: #1976d2; }
+    button.danger { background: #8b1c1c; border-color: #b71c1c; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #statusBar {
+      padding: 0.6rem 0.85rem;
+      border-radius: 8px;
+      background: #121820;
+      border: 1px solid var(--border);
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+    }
+    #statusBar.ok { border-color: #33691e; color: var(--ok); }
+    #statusBar.err { border-color: #b71c1c; color: #ff8a80; }
+    details { margin-top: 0.75rem; }
+    summary { cursor: pointer; color: var(--muted); margin-bottom: 0.5rem; }
+    .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.35rem; }
+    .pill {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      background: #243040;
+      margin-left: 0.35rem;
+    }
+    #deviceSelect { min-width: 280px; }
+    #firmwareApplySelect { min-width: 280px; }
+    .device-meta { font-size: 0.8rem; color: var(--muted); }
+    .firmware-list {
+      margin: 0.5rem 0 0;
+      padding: 0;
+      list-style: none;
+      font-size: 0.85rem;
+    }
+    .firmware-list li {
+      padding: 0.35rem 0;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .firmware-list li:last-child { border-bottom: none; }
+    .firmware-list strong { color: var(--text); }
+    .step-hint {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin: 0 0 0.75rem;
+    }
+    .subsection {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+    }
+    .subsection h3 {
+      margin: 0 0 0.5rem;
+      font-size: 0.9rem;
+      color: var(--text);
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Hermes Voice Bridge</h1>
+    <p>Device config, firmware hosting, and OTA</p>
+  </header>
+  <main>
+    <div id="statusBar">Loading…</div>
+
+    <section>
+      <h2>Paired devices</h2>
+      <p class="hint">Devices auto-register when they upload speech. Pick one to configure, or add manually by IP.</p>
+      <div class="grid">
+        <div>
+          <label for="deviceSelect">Active device</label>
+          <select id="deviceSelect">
+            <option value="">— loading —</option>
+          </select>
+          <div id="deviceMeta" class="device-meta"></div>
+        </div>
+        <div>
+          <label for="addDeviceIp">Add device by IP</label>
+          <input id="addDeviceIp" placeholder="192.168.100.217" />
+        </div>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnAddDevice">Add / pair device</button>
+        <button id="btnRefreshDevices">Refresh list</button>
+        <button class="danger" id="btnRemoveDevice">Remove selected</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Connection <span id="activeDeviceLabel" class="pill"></span></h2>
+      <div class="grid">
+        <div>
+          <label for="deviceIp">ESP device IP</label>
+          <input id="deviceIp" placeholder="192.168.100.217" />
+        </div>
+        <div>
+          <label for="otaSecret">OTA secret (X-Ota-Secret)</label>
+          <input id="otaSecret" type="text" autocomplete="off" spellcheck="false" />
+        </div>
+        <div>
+          <label for="authToken">Device auth token</label>
+          <input id="authToken" type="text" autocomplete="off" spellcheck="false" required />
+        </div>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnSaveConn">Save connection</button>
+        <button id="btnPingDevice">Ping device</button>
+        <span id="deviceVersion" class="pill"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Firmware</h2>
+      <p class="step-hint">Push builds to the bridge server first, then apply a hosted version to your paired device(s).</p>
+
+      <h3>1 — Push to server</h3>
+      <div class="grid">
+        <div>
+          <label for="firmwareFile">Firmware file (.bin)</label>
+          <input id="firmwareFile" type="file" accept=".bin,application/octet-stream" />
+        </div>
+        <div>
+          <label for="firmwareVersionOverride">Version override (optional)</label>
+          <input id="firmwareVersionOverride" placeholder="auto-detect from binary" />
+        </div>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnUploadFirmware">Push to server</button>
+        <button id="btnRefreshFirmware">Refresh list</button>
+      </div>
+      <ul id="firmwareServerList" class="firmware-list">
+        <li>Loading server firmware…</li>
+      </ul>
+
+      <div class="subsection">
+        <h3>2 — Apply to device(s)</h3>
+        <p class="step-hint">Uses the active device from <strong>Paired devices</strong> above, or check “all devices” to OTA every paired box.</p>
+        <div class="grid">
+          <div>
+            <label for="firmwareApplySelect">Firmware to apply</label>
+            <select id="firmwareApplySelect">
+              <option value="">— loading —</option>
+            </select>
+            <div id="firmwareApplyMeta" class="device-meta"></div>
+          </div>
+          <div>
+            <label>Target</label>
+            <div id="firmwareApplyTarget" class="device-meta">—</div>
+          </div>
+        </div>
+        <div class="row">
+          <button class="primary" id="btnApplyFirmware">Apply to active device</button>
+          <label><input type="checkbox" id="otaAllDevices" /> All paired devices</label>
+          <label><input type="checkbox" id="otaForce" /> Force reinstall <span class="info-tip" tabindex="0" aria-label="Help"><span class="tip-icon">i</span><span class="tip-balloon" role="tooltip">Re-flash even if the device already reports the same firmware version.</span></span></label>
+        </div>
+        <pre id="otaLog" class="hint" style="margin-top:0.75rem"></pre>
+      </div>
+    </section>
+
+    <section>
+      <h2>Device configuration</h2>
+      <div class="row">
+        <button class="primary" id="btnLoadConfig">Load from device</button>
+        <button id="btnApplyConfig">Apply to device</button>
+        <button id="btnSaveDeviceConfig">Save to NVS</button>
+        <button id="btnLoadSaved">Load saved NVS</button>
+        <button id="btnDownloadJson">Download JSON</button>
+        <label class="hint"><input type="file" id="configFile" accept=".json,application/json" hidden />
+          <button id="btnImportJson" type="button">Import JSON file</button>
+        </label>
+      </div>
+
+      <details open>
+        <summary>Identity &amp; auth</summary>
+        <div class="grid">
+          <div><label>deviceName</label><input data-path="identity.deviceName" /></div>
+          <div><label>auth.token</label><input data-path="auth.token" type="text" spellcheck="false" /></div>
+        </div>
+      </details>
+
+      <details open>
+        <summary>Wi‑Fi</summary>
+        <div class="grid">
+          <div><label>wifi.ssid</label><input data-path="wifi.ssid" /></div>
+          <div><label>wifi.password</label><input data-path="wifi.password" type="text" spellcheck="false" /></div>
+        </div>
+      </details>
+
+      <details open>
+        <summary>Network &amp; callbacks</summary>
+        <div class="grid">
+          <div><label>network.callbackBaseUrl</label><input data-path="network.callbackBaseUrl" /></div>
+          <div><label>network.localHttpPort</label><input data-path="network.localHttpPort" type="number" /></div>
+          <div><label>callbacks.speechUrl</label><input data-path="callbacks.speechUrl" /></div>
+          <div><label>callbacks.speechFinalizeUrl</label><input data-path="callbacks.speechFinalizeUrl" /></div>
+          <div><label>callbacks.uiEventUrl</label><input data-path="callbacks.uiEventUrl" /></div>
+          <div><label>callbacks.heartbeatUrl</label><input data-path="callbacks.heartbeatUrl" /></div>
+        </div>
+      </details>
+
+      <details open>
+        <summary>VAD</summary>
+        <div class="grid">
+          <div><label>vad.speechStartThreshold</label><input data-path="vad.speechStartThreshold" type="number" /></div>
+          <div><label>vad.silenceFinalizeMs</label><input data-path="vad.silenceFinalizeMs" type="number" /></div>
+          <div><label>vad.preRollPaddingMs</label><input data-path="vad.preRollPaddingMs" type="number" /></div>
+          <div><label>vad.postRollPaddingMs</label><input data-path="vad.postRollPaddingMs" type="number" /></div>
+        </div>
+      </details>
+
+      <details>
+        <summary>Time &amp; OTA</summary>
+        <div class="grid">
+          <div><label>time.timezone</label><input data-path="time.timezone" /></div>
+          <div><label>time.sntpServer</label><input data-path="time.sntpServer" /></div>
+          <div><label>time.syncIntervalSec</label><input data-path="time.syncIntervalSec" type="number" /></div>
+          <div><label>ota.secret</label><input data-path="ota.secret" type="text" spellcheck="false" /></div>
+          <div><label>ota.manifestUrl</label><input data-path="ota.manifestUrl" /></div>
+        </div>
+      </details>
+
+      <details>
+        <summary>Raw JSON</summary>
+        <textarea id="rawJson" placeholder="Full config object JSON"></textarea>
+      </details>
+    </section>
+  </main>
+
+  <script>
+    const API = "/api/v1";
+    let currentConfig = {};
+    let pairedDevices = [];
+    let firmwareCatalog = { firmwares: [], active_version: "" };
+
+    function formatBytes(size) {
+      if (!size) return "0 B";
+      if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+      return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    function renderFirmwareCatalog(fwData) {
+      firmwareCatalog = fwData || { firmwares: [], active_version: "" };
+      const list = firmwareCatalog.firmwares || [];
+      const serverList = document.getElementById("firmwareServerList");
+      serverList.innerHTML = "";
+      if (!list.length) {
+        serverList.innerHTML = "<li>No firmware on server yet — push a .bin file above.</li>";
+      } else {
+        for (const fw of list) {
+          const li = document.createElement("li");
+          const when = fw.uploaded_at ? new Date(fw.uploaded_at * 1000).toLocaleString() : "";
+          li.innerHTML = `<strong>v${fw.version}</strong> · ${formatBytes(fw.size)} · ${fw.source || "upload"}${when ? ` · ${when}` : ""}`;
+          serverList.appendChild(li);
+        }
+      }
+
+      const applySel = document.getElementById("firmwareApplySelect");
+      const applyMeta = document.getElementById("firmwareApplyMeta");
+      applySel.innerHTML = "";
+      if (!list.length) {
+        applySel.innerHTML = '<option value="">No firmware on server</option>';
+        applyMeta.textContent = "";
+        return;
+      }
+      const preferred = firmwareCatalog.active_version || list[0].version;
+      for (const fw of list) {
+        const opt = document.createElement("option");
+        opt.value = fw.version;
+        opt.dataset.binaryUrl = fw.binary_url || "";
+        opt.dataset.manifestUrl = fw.manifest_url || "";
+        opt.textContent = `v${fw.version} (${formatBytes(fw.size)})`;
+        if (fw.version === preferred) opt.selected = true;
+        applySel.appendChild(opt);
+      }
+      updateFirmwareApplyMeta();
+    }
+
+    function updateFirmwareApplyMeta() {
+      const sel = document.getElementById("firmwareApplySelect");
+      const meta = document.getElementById("firmwareApplyMeta");
+      const opt = sel.options[sel.selectedIndex];
+      meta.textContent = opt?.dataset.binaryUrl || "";
+      const target = document.getElementById("firmwareApplyTarget");
+      const active = pairedDevices.find((d) => d.active) || pairedDevices[0];
+      const all = document.getElementById("otaAllDevices")?.checked;
+      if (all && pairedDevices.length) {
+        target.textContent = `All ${pairedDevices.length} paired device(s)`;
+      } else if (active) {
+        target.textContent = `${active.device_name || active.device_uid} @ ${active.ip || "no IP"}`;
+      } else {
+        target.textContent = "No device selected — pick one under Paired devices";
+      }
+    }
+
+    function selectedApplyVersion() {
+      return document.getElementById("firmwareApplySelect").value.trim();
+    }
+
+    const PARAM_TIPS = {
+      deviceSelect: "Device currently selected for config, OTA, and connection settings.",
+      addDeviceIp: "LAN IP of an ESP32 box to pair manually. The bridge fetches its UID from /api/v1/version.",
+      deviceIp: "LAN IP used by the bridge to reach this device (REST config, OTA trigger, ping).",
+      otaSecret: "Shared secret sent as X-Ota-Secret when triggering OTA. Must match ota.secret on the device.",
+      authToken: "Auto-generated per device. Used for X-Auth-Token on config, OTA, and playback API calls.",
+      firmwareFile: "esp32-voice.bin for your hardware. Push adds it to the server library — it is not sent to devices until you apply.",
+      firmwareVersionOverride: "Override version string when auto-detection from the binary fails.",
+      firmwareApplySelect: "Hosted firmware version to flash via OTA on the target device(s).",
+      "identity.deviceName": "Human-friendly label for this terminal (displayed in logs and the admin UI).",
+      "auth.token": "Required on every device. Auto-generated by the bridge if missing, then pushed to the device.",
+      "wifi.ssid": "Wi-Fi network the ESP joins on boot. Use Apply + Save to persist and apply live.",
+      "wifi.password": "Wi-Fi passphrase stored on the device.",
+      "network.callbackBaseUrl": "Base URL for backend callbacks, e.g. http://bridge:8080/api/v1. Device derives speech URLs from this.",
+      "network.localHttpPort": "TCP port for the ESP local HTTP API (usually 80).",
+      "callbacks.speechUrl": "Streaming PCM upload endpoint (protocol A3). Often {callbackBaseUrl}/speech/stream.",
+      "callbacks.speechFinalizeUrl": "JSON finalize endpoint after speech ends. Often {callbackBaseUrl}/speech/finalize.",
+      "callbacks.uiEventUrl": "Optional webhook for UI/display events from the device.",
+      "callbacks.heartbeatUrl": "Optional periodic health ping URL. Leave empty to disable.",
+      "vad.speechStartThreshold": "Energy level (approx. 0–100) to detect speech start. Lower = more sensitive mic.",
+      "vad.silenceFinalizeMs": "Milliseconds of silence after speech before the utterance is finalized and uploaded.",
+      "vad.preRollPaddingMs": "Audio captured before speech detection (ms). Higher preserves word onsets for Whisper.",
+      "vad.postRollPaddingMs": "Audio kept after speech ends (ms) so trailing syllables are not cut off.",
+      "time.timezone": "POSIX TZ string for local clock display, e.g. UTC0 or CET-1CEST.",
+      "time.sntpServer": "NTP server hostname used to sync device time.",
+      "time.syncIntervalSec": "How often (seconds) to re-sync time from SNTP.",
+      "ota.secret": "Secret stored on the device; OTA update requests must present the same value in X-Ota-Secret.",
+      "ota.manifestUrl": "Default firmware manifest URL on the device. Often left empty so the bridge URL is used at trigger time.",
+      rawJson: "Full active config as JSON. Edit here for advanced patches, then click Apply.",
+    };
+
+    function attachParamTips() {
+      for (const [key, text] of Object.entries(PARAM_TIPS)) {
+        const field = document.getElementById(key) || document.querySelector(`[data-path="${key}"]`);
+        if (!field) continue;
+        let label = field.id ? document.querySelector(`label[for="${field.id}"]`) : null;
+        if (!label) {
+          const wrap = field.closest("div");
+          label = wrap ? wrap.querySelector("label") : null;
+        }
+        if (!label || label.querySelector(".info-tip")) continue;
+        label.classList.add("label-row");
+        const tip = document.createElement("span");
+        tip.className = "info-tip";
+        tip.tabIndex = 0;
+        tip.setAttribute("aria-label", "Help");
+        tip.innerHTML =
+          '<span class="tip-icon">i</span>' +
+          `<span class="tip-balloon" role="tooltip">${text.replace(/</g, "&lt;")}</span>`;
+        label.appendChild(tip);
+      }
+    }
+
+    function formatLastSeen(ts) {
+      if (!ts) return "never";
+      const d = new Date(ts * 1000);
+      return d.toLocaleString();
+    }
+
+    function renderDeviceSelect(devices, activeUid) {
+      pairedDevices = devices || [];
+      const sel = document.getElementById("deviceSelect");
+      sel.innerHTML = "";
+      if (!pairedDevices.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "No paired devices yet";
+        sel.appendChild(opt);
+        document.getElementById("deviceMeta").textContent = "";
+        document.getElementById("activeDeviceLabel").textContent = "";
+        return;
+      }
+      for (const d of pairedDevices) {
+        const opt = document.createElement("option");
+        opt.value = d.device_uid;
+        const name = d.device_name || d.device_uid;
+        const ip = d.ip ? ` @ ${d.ip}` : "";
+        const fw = d.firmware_version ? ` · FW ${d.firmware_version}` : "";
+        opt.textContent = `${name}${ip}${fw}${d.active ? " (active)" : ""}`;
+        if (d.device_uid === activeUid) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      const active = pairedDevices.find((d) => d.device_uid === activeUid) || pairedDevices[0];
+      if (active) {
+        document.getElementById("deviceMeta").textContent =
+          `${active.device_uid} · last seen ${formatLastSeen(active.last_seen_at)} · ${active.source}`;
+        document.getElementById("activeDeviceLabel").textContent = active.device_name || active.device_uid;
+      }
+      updateFirmwareApplyMeta();
+    }
+
+    async function selectDevice(deviceUid) {
+      if (!deviceUid) return;
+      setStatus("Switching device…");
+      const data = await api("/ui/devices/select", {
+        method: "POST",
+        body: JSON.stringify({ device_uid: deviceUid }),
+      });
+      if (!data.ok) {
+        setStatus(data.error || JSON.stringify(data), "err");
+        return;
+      }
+      await applyBootstrapData(data);
+    }
+
+    async function addDevice() {
+      const ip = document.getElementById("addDeviceIp").value.trim();
+      if (!ip) {
+        setStatus("Enter an IP address to add a device.", "err");
+        return;
+      }
+      setStatus("Pairing device…");
+      const data = await api("/ui/devices", {
+        method: "POST",
+        body: JSON.stringify({ ip, make_active: true }),
+      });
+      if (!data.ok) {
+        setStatus(data.error || JSON.stringify(data), "err");
+        return;
+      }
+      document.getElementById("addDeviceIp").value = "";
+      renderDeviceSelect(data.devices, data.active_device_uid);
+      await bootstrap();
+    }
+
+    async function removeDevice() {
+      const uid = document.getElementById("deviceSelect").value;
+      if (!uid) {
+        setStatus("No device selected.", "err");
+        return;
+      }
+      if (!confirm(`Remove ${uid} from paired devices?`)) return;
+      const data = await api("/ui/devices/remove", {
+        method: "POST",
+        body: JSON.stringify({ device_uid: uid }),
+      });
+      if (!data.ok) {
+        setStatus(data.error || JSON.stringify(data), "err");
+        return;
+      }
+      renderDeviceSelect(data.devices, data.active_device_uid);
+      await bootstrap();
+    }
+
+    async function applyBootstrapData(data) {
+      if (!data.ok) {
+        setStatus(data.error || JSON.stringify(data), "err");
+        return;
+      }
+
+      renderDeviceSelect(data.devices, data.active_device_uid);
+
+      document.getElementById("deviceIp").value = data.device_ip || "";
+      document.getElementById("otaSecret").value = data.ota_secret || "";
+      document.getElementById("authToken").value = data.auth_token || "";
+
+      const fw = data.firmware_info || data.firmware || {};
+      renderFirmwareCatalog(fw);
+
+      const device = data.device || {};
+      document.getElementById("deviceVersion").textContent = "";
+      if (device.version && device.version.firmware_version) {
+        document.getElementById("deviceVersion").textContent =
+          "FW " + device.version.firmware_version;
+      }
+
+      if (device.config && device.config.config) {
+        currentConfig = device.config.config;
+        fillForm(currentConfig);
+      } else {
+        currentConfig = {};
+        fillForm({});
+      }
+
+      const active = (data.devices || []).find((d) => d.device_uid === data.active_device_uid);
+      const label = active ? (active.device_name || active.device_uid) : "";
+      const parts = [];
+      if (label) parts.push(label);
+      if (data.device_ip) parts.push(data.device_ip);
+      if (device.reachable) {
+        parts.push(`firmware ${device.version?.firmware_version || "?"}`);
+        if (device.config?.config) parts.push("config loaded");
+        if (device.auth_provisioned) parts.push("auth token provisioned");
+        setStatus("Ready — " + parts.join(" · ") + ".", "ok");
+      } else if (device.error) {
+        setStatus(
+          (label ? `${label}: ` : "") + device.error,
+          "err"
+        );
+      } else if (!data.device_ip && data.last_seen_device_ip) {
+        setStatus(
+          `Last ESP upload from ${data.last_seen_device_ip} — add or select a device.`,
+          "err"
+        );
+      } else if (!pairedDevices.length) {
+        setStatus("No paired devices yet — add one by IP or wait for speech upload.", "err");
+      } else {
+        setStatus("Select a device and check its IP / OTA secret in Connection.", "err");
+      }
+    }
+
+    function setStatus(msg, kind = "") {
+      const el = document.getElementById("statusBar");
+      el.textContent = msg;
+      el.className = kind;
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(API + path, {
+        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+        ...opts,
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      if (!res.ok && !data.error) data.error = res.statusText;
+      data._httpStatus = res.status;
+      return data;
+    }
+
+    function getByPath(obj, path) {
+      return path.split(".").reduce((o, k) => (o && k in o ? o[k] : undefined), obj);
+    }
+
+    function setByPath(obj, path, value) {
+      const parts = path.split(".");
+      let cur = obj;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const p = parts[i];
+        if (typeof cur[p] !== "object" || cur[p] === null) cur[p] = {};
+        cur = cur[p];
+      }
+      const last = parts[parts.length - 1];
+      const numFields = new Set([
+        "network.localHttpPort", "vad.speechStartThreshold", "vad.silenceFinalizeMs",
+        "vad.preRollPaddingMs", "vad.postRollPaddingMs", "time.syncIntervalSec",
+      ]);
+      if (numFields.has(path) && value !== "" && value != null) {
+        cur[last] = Number(value);
+      } else {
+        cur[last] = value;
+      }
+    }
+
+    function fillForm(cfg) {
+      document.querySelectorAll("[data-path]").forEach((el) => {
+        const v = getByPath(cfg, el.dataset.path);
+        el.value = v === undefined || v === null ? "" : String(v);
+      });
+      document.getElementById("rawJson").value = JSON.stringify(cfg, null, 2);
+    }
+
+    function readFormConfig() {
+      const cfg = JSON.parse(JSON.stringify(currentConfig || {}));
+      document.querySelectorAll("[data-path]").forEach((el) => {
+        if (el.value === "***") return;
+        setByPath(cfg, el.dataset.path, el.value);
+      });
+      return cfg;
+    }
+
+    async function loadBridgeSettings() {
+      const data = await api("/ui/settings");
+      document.getElementById("deviceIp").value = data.device_ip || "";
+      document.getElementById("otaSecret").value = data.ota_secret || "";
+      document.getElementById("authToken").value = data.auth_token || "";
+      if (data.firmware) renderFirmwareCatalog({ ...firmwareCatalog, ...data.firmware, firmwares: firmwareCatalog.firmwares });
+    }
+
+    async function loadFirmwareList() {
+      const data = await api("/ui/firmware/list");
+      renderFirmwareCatalog(data);
+      return data;
+    }
+
+    async function bootstrap() {
+      setStatus("Loading bridge and device…");
+      const data = await api("/ui/bootstrap");
+      await applyBootstrapData(data);
+    }
+
+    async function saveConnection() {
+      const body = {
+        device_ip: document.getElementById("deviceIp").value.trim(),
+        ota_secret: document.getElementById("otaSecret").value,
+        auth_token: document.getElementById("authToken").value,
+      };
+      const data = await api("/ui/settings", { method: "POST", body: JSON.stringify(body) });
+      if (data.ok) setStatus("Connection settings saved.", "ok");
+      else setStatus(data.error || JSON.stringify(data), "err");
+      await bootstrap();
+    }
+
+    async function pingDevice() {
+      const data = await api("/ui/device/version");
+      if (data.firmware_version) {
+        document.getElementById("deviceVersion").textContent = "FW " + data.firmware_version;
+        setStatus(`Device ${data.device_uid} — firmware ${data.firmware_version}`, "ok");
+      } else {
+        setStatus(data.error || JSON.stringify(data), "err");
+      }
+    }
+
+    async function loadConfigFromDevice() {
+      setStatus("Loading config from device…");
+      const data = await api("/ui/device/config");
+      if (!data.config) {
+        setStatus(data.error || JSON.stringify(data), "err");
+        return;
+      }
+      currentConfig = data.config;
+      fillForm(currentConfig);
+      setStatus(`Config loaded (dirty=${data.dirty}).`, "ok");
+    }
+
+    async function applyConfig() {
+      const patch = readFormConfig();
+      setStatus("Applying config patch…");
+      const data = await api("/ui/device/config/patch", {
+        method: "POST",
+        body: JSON.stringify({ patch }),
+      });
+      if (data.ok !== false && data._httpStatus < 400) {
+        setStatus("Config applied to running device.", "ok");
+        await loadConfigFromDevice();
+      } else {
+        setStatus(JSON.stringify(data, null, 2), "err");
+      }
+    }
+
+    async function saveDeviceConfig() {
+      setStatus("Saving to device NVS…");
+      const data = await api("/ui/device/config/save", { method: "POST", body: "{}" });
+      setStatus(data.message || JSON.stringify(data), data.ok ? "ok" : "err");
+    }
+
+    async function loadSavedConfig() {
+      const data = await api("/ui/device/config/saved");
+      if (!data.config) {
+        setStatus(data.error || JSON.stringify(data), "err");
+        return;
+      }
+      currentConfig = data.config;
+      fillForm(currentConfig);
+      setStatus("Loaded saved NVS config.", "ok");
+    }
+
+    function downloadJson() {
+      const cfg = readFormConfig();
+      const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "esp32-voice-config.json";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    document.getElementById("configFile").addEventListener("change", async (ev) => {
+      const file = ev.target.files[0];
+      if (!file) return;
+      try {
+        const cfg = JSON.parse(await file.text());
+        currentConfig = cfg;
+        fillForm(cfg);
+        setStatus("Imported JSON — click Apply to push to device.", "ok");
+      } catch (e) {
+        setStatus("Invalid JSON file: " + e, "err");
+      }
+      ev.target.value = "";
+    });
+
+    async function uploadFirmware() {
+      const fileInput = document.getElementById("firmwareFile");
+      if (!fileInput.files.length) {
+        setStatus("Choose a firmware .bin file first.", "err");
+        return;
+      }
+      const fd = new FormData();
+      fd.append("firmware", fileInput.files[0]);
+      const ver = document.getElementById("firmwareVersionOverride").value.trim();
+      if (ver) fd.append("version", ver);
+      setStatus("Pushing firmware to server…");
+      const res = await fetch(API + "/ui/firmware/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (data.ok) {
+        renderFirmwareCatalog(data);
+        document.getElementById("firmwareFile").value = "";
+        document.getElementById("firmwareVersionOverride").value = "";
+        setStatus(`v${data.version} on server (${formatBytes(data.size)}). Pick it below and apply to device(s).`, "ok");
+      } else {
+        setStatus(data.error || JSON.stringify(data), "err");
+      }
+    }
+
+    async function applyFirmware() {
+      const log = document.getElementById("otaLog");
+      log.textContent = "";
+      const version = selectedApplyVersion();
+      if (!version) {
+        setStatus("Choose a firmware version to apply.", "err");
+        return;
+      }
+      const allDevices = document.getElementById("otaAllDevices").checked;
+      const force = document.getElementById("otaForce").checked;
+      if (!allDevices) {
+        const active = pairedDevices.find((d) => d.active) || pairedDevices[0];
+        if (!active) {
+          setStatus("No paired device — add or select a device first.", "err");
+          return;
+        }
+        if (!active.ip) {
+          setStatus("Active device has no IP — set it under Connection.", "err");
+          return;
+        }
+      } else if (!pairedDevices.length) {
+        setStatus("No paired devices to update.", "err");
+        return;
+      }
+
+      const targetLabel = allDevices
+        ? `all ${pairedDevices.length} device(s)`
+        : (pairedDevices.find((d) => d.active) || pairedDevices[0]).device_uid;
+      setStatus(`Applying v${version} to ${targetLabel}…`);
+      const data = await api("/ui/firmware/apply", {
+        method: "POST",
+        body: JSON.stringify({
+          version,
+          all_devices: allDevices,
+          force,
+        }),
+      });
+      log.textContent = JSON.stringify(data, null, 2);
+      if (!data.ok) {
+        setStatus(data.error || `OTA failed (${data.applied}/${data.total} ok)`, "err");
+        return;
+      }
+      setStatus(`OTA started for v${version} — ${data.applied}/${data.total} device(s).`, "ok");
+      await bootstrap();
+    }
+
+    document.getElementById("btnSaveConn").onclick = saveConnection;
+    document.getElementById("btnPingDevice").onclick = pingDevice;
+    document.getElementById("deviceSelect").onchange = (ev) => selectDevice(ev.target.value);
+    document.getElementById("btnAddDevice").onclick = addDevice;
+    document.getElementById("btnRefreshDevices").onclick = bootstrap;
+    document.getElementById("btnRemoveDevice").onclick = removeDevice;
+    document.getElementById("btnLoadConfig").onclick = loadConfigFromDevice;
+    document.getElementById("btnApplyConfig").onclick = applyConfig;
+    document.getElementById("btnSaveDeviceConfig").onclick = saveDeviceConfig;
+    document.getElementById("btnLoadSaved").onclick = loadSavedConfig;
+    document.getElementById("btnDownloadJson").onclick = downloadJson;
+    document.getElementById("btnImportJson").onclick = () => document.getElementById("configFile").click();
+    document.getElementById("btnUploadFirmware").onclick = uploadFirmware;
+    document.getElementById("btnRefreshFirmware").onclick = loadFirmwareList;
+    document.getElementById("firmwareApplySelect").onchange = updateFirmwareApplyMeta;
+    document.getElementById("otaAllDevices").onchange = updateFirmwareApplyMeta;
+    document.getElementById("btnApplyFirmware").onclick = applyFirmware;
+
+    attachParamTips();
+    bootstrap();
+  </script>
+</body>
+</html>

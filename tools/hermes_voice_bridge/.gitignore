@@ -1,3 +1,6 @@
 recordings/
 .hermes_session.json
 hermes_curl_*
+uploads/
+bridge_settings.json
+devices.json

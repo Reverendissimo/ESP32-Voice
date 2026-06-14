@@ -105,16 +105,21 @@ def resolve_firmware_bundle(
     )
 
 
-def build_manifest(*, bundle: FirmwareBundle, base_url: str) -> dict:
+def build_manifest(*, bundle: FirmwareBundle, base_url: str, version: str | None = None) -> dict:
     base = base_url.rstrip("/")
+    ver = (version or bundle.version).strip()
+    if ver:
+        bin_url = f"{base}/firmware/{ver}/esp32-voice.bin"
+    else:
+        bin_url = f"{base}/firmware/esp32-voice.bin"
     return {
         "version": bundle.version,
-        "url": f"{base}/firmware/esp32-voice.bin",
+        "url": bin_url,
         "size": bundle.size,
         "project": "esp32-voice",
     }
 
 
-def manifest_json(*, bundle: FirmwareBundle, base_url: str) -> bytes:
-    payload = build_manifest(bundle=bundle, base_url=base_url)
+def manifest_json(*, bundle: FirmwareBundle, base_url: str, version: str | None = None) -> bytes:
+    payload = build_manifest(bundle=bundle, base_url=base_url, version=version)
     return (json.dumps(payload, indent=2) + "\n").encode("utf-8")

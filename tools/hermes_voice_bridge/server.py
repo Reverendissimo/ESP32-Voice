@@ -50,8 +50,12 @@ try:
 except ImportError:
     requests = None  # type: ignore
 
+from bridge_settings import BridgeSettingsStore, settings_defaults_from_env
+from bridge_ui import BridgeUiHandlers
+from device_registry import DeviceRegistry
 from esp_playback import stream_pcm_to_esp
-from firmware_hosting import FirmwareBundle, manifest_json, resolve_firmware_bundle
+from firmware_catalog import FirmwareCatalog
+from firmware_hosting import FirmwareBundle, manifest_json
 from hermes_client import HermesClient, HermesError, build_hermes_from_args
 from hermes_session import DEFAULT_SESSION_FILE, resolve_active_session
 from ml_runtime import configure_ml_runtime
@@ -88,8 +92,21 @@ class SpeechStore:
         self._lock = threading.Lock()
         self._active: dict[str, Utterance] = {}
         self._history: list[dict[str, Any]] = []
+        self._last_device_ip = ""
         self.recordings_dir = recordings_dir
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
+
+    def note_device_ip(self, device_ip: str) -> None:
+        ip = str(device_ip or "").strip()
+        if not ip:
+            return
+        with self._lock:
+            self._last_device_ip = ip
+
+    @property
+    def last_device_ip(self) -> str:
+        with self._lock:
+            return self._last_device_ip
 
     def add_chunk(self, payload: dict[str, Any]) -> None:
         utterance_id = str(payload["utterance_id"])
@@ -302,6 +319,12 @@ def hermes_failure_reply(kind: str) -> str:
     return "Sorry, I could not reach the assistant right now."
 
 
+def device_auth_token(cfg: "ServerConfig", device_uid: str) -> str:
+    if cfg.device_registry is not None and device_uid:
+        return cfg.device_registry.device_settings(device_uid).auth_token
+    return cfg.echo_auth_token
+
+
 def handle_voice_reply(
     cfg: "ServerConfig",
     utterance_id: str,
@@ -329,7 +352,7 @@ def handle_voice_reply(
                         sentence,
                         device_uid=device_uid,
                         device_ip=device_ip,
-                        auth_token=cfg.echo_auth_token,
+                        auth_token=device_auth_token(cfg, device_uid),
                         stream_end=False,
                     )
 
@@ -360,7 +383,7 @@ def handle_voice_reply(
                     remainder,
                     device_uid=device_uid,
                     device_ip=device_ip,
-                    auth_token=cfg.echo_auth_token,
+                    auth_token=device_auth_token(cfg, device_uid),
                     stream_end=True,
                 )
             elif tts_started and cfg.tts is not None:
@@ -370,7 +393,7 @@ def handle_voice_reply(
                     b"",
                     16000,
                     1,
-                    cfg.echo_auth_token,
+                    device_auth_token(cfg, device_uid),
                     stream_end=True,
                     log_prefix="[tts]",
                 )
@@ -384,7 +407,7 @@ def handle_voice_reply(
         reply,
         device_uid=device_uid,
         device_ip=device_ip,
-        auth_token=cfg.echo_auth_token,
+        auth_token=device_auth_token(cfg, device_uid),
         stream_end=True,
     )
 
@@ -392,6 +415,8 @@ def handle_voice_reply(
 class ServerConfig:
     prefix: str
     store: SpeechStore
+    device_registry: DeviceRegistry | None = None
+    firmware_catalog: FirmwareCatalog | None = None
     echo_enabled: bool = False
     echo_device_ip: str = ""
     echo_auth_token: str = ""
@@ -404,6 +429,10 @@ class ServerConfig:
     firmware_bin_path: str = ""
     firmware_version_override: str = ""
     public_base_url: str = ""
+
+
+_FW_VERSION_BIN_RE = re.compile(r"^/firmware/([^/]+)/esp32-voice\.bin$")
+_FW_VERSION_MANIFEST_RE = re.compile(r"^/firmware/([^/]+)/manifest\.json$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -515,64 +544,103 @@ class Handler(BaseHTTPRequestHandler):
             return self.cfg.prefix.rstrip("/")
         return f"http://{host}{self.cfg.prefix.rstrip('/')}"
 
-    def _resolve_firmware(self) -> FirmwareBundle | None:
-        override = self.cfg.firmware_version_override.strip() or None
-        explicit = self.cfg.firmware_bin_path.strip() or None
-        return resolve_firmware_bundle(explicit_bin=explicit, version_override=override)
+    def _resolve_firmware(self, version: str = "") -> FirmwareBundle | None:
+        catalog = self.cfg.firmware_catalog
+        if catalog is None:
+            return None
+        ver = version.strip()
+        if ver:
+            return catalog.bundle_for_version(ver)
+        return catalog.active_bundle()
+
+    def _serve_firmware_manifest(self, version: str = "") -> None:
+        bundle = self._resolve_firmware(version)
+        if bundle is None:
+            self._send_json(
+                404,
+                {"v": 1, "error": {"code": "NOT_FOUND", "message": "Firmware binary not available"}},
+            )
+            return
+        body = manifest_json(
+            bundle=bundle,
+            base_url=self._public_base_url(),
+            version=version or bundle.version,
+        )
+        self._send_bytes(200, body, "application/json")
+
+    def _serve_firmware_binary(self, version: str = "") -> None:
+        bundle = self._resolve_firmware(version)
+        if bundle is None:
+            self._send_json(
+                404,
+                {"v": 1, "error": {"code": "NOT_FOUND", "message": "Firmware binary not available"}},
+            )
+            return
+        data = bundle.bin_path.read_bytes()
+        self._send_bytes(200, data, "application/octet-stream")
+
+    def _try_ui_get(self, path: str) -> bool:
+        ui: BridgeUiHandlers | None = getattr(self.server, "ui_handlers", None)
+        if ui is None:
+            return False
+        result = ui.handle_get(path)
+        if result is None:
+            return False
+        code, content_type, body = result
+        self._send_bytes(code, body, content_type)
+        return True
+
+    def _try_ui_post(self, path: str) -> bool:
+        ui: BridgeUiHandlers | None = getattr(self.server, "ui_handlers", None)
+        if ui is None:
+            return False
+
+        if path == "/ui/firmware/upload":
+            try:
+                data, version_override = ui.parse_firmware_upload(self.headers, self.rfile)
+                payload = ui.save_firmware_bytes(data, version_override=version_override)
+                self._send_json(200, payload)
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+            except OSError as exc:
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return True
+
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length > 0 else b""
+        result = ui.handle_post(path, body, self.headers)
+        if result is None:
+            return False
+        code, content_type, payload = result
+        self._send_bytes(code, payload, content_type)
+        return True
 
     def do_GET(self) -> None:
         path = self._route_path()
 
+        if self._try_ui_get(path):
+            return
+
         if path == "/firmware/manifest.json":
-            bundle = self._resolve_firmware()
-            if bundle is None:
-                self._send_json(
-                    404,
-                    {"v": 1, "error": {"code": "NOT_FOUND", "message": "Firmware binary not available"}},
-                )
-                return
-            body = manifest_json(bundle=bundle, base_url=self._public_base_url())
-            self._send_bytes(200, body, "application/json")
+            self._serve_firmware_manifest()
             return
 
         if path == "/firmware/esp32-voice.bin":
-            bundle = self._resolve_firmware()
-            if bundle is None:
-                self._send_json(
-                    404,
-                    {"v": 1, "error": {"code": "NOT_FOUND", "message": "Firmware binary not available"}},
-                )
-                return
-            data = bundle.bin_path.read_bytes()
-            self._send_bytes(200, data, "application/octet-stream")
+            self._serve_firmware_binary()
+            return
+
+        manifest_match = _FW_VERSION_MANIFEST_RE.match(path)
+        if manifest_match:
+            self._serve_firmware_manifest(manifest_match.group(1))
+            return
+
+        bin_match = _FW_VERSION_BIN_RE.match(path)
+        if bin_match:
+            self._serve_firmware_binary(bin_match.group(1))
             return
 
         if path == "/status":
             self._send_json(200, {"v": 1, **self.cfg.store.status()})
-            return
-
-        if self._route_path() == "/":
-            status = self.cfg.store.status()
-            lines = [
-                "Hermes-Voice-Bridge",
-                "",
-                f"POST {self.cfg.prefix}/speech/stream",
-                f"POST {self.cfg.prefix}/speech",
-                f"POST {self.cfg.prefix}/speech/finalize",
-                f"POST {self.cfg.prefix}/tts/speak",
-                f"GET  {self.cfg.prefix}/status",
-                f"GET  {self.cfg.prefix}/firmware/manifest.json",
-                f"GET  {self.cfg.prefix}/firmware/esp32-voice.bin",
-                "",
-                f"Recordings: {status['recordings_dir']}",
-                f"Active utterances: {len(status['active_utterances'])}",
-            ]
-            body = "\n".join(lines).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
             return
 
         self._send_json(404, {"v": 1, "error": {"code": "NOT_FOUND", "message": "Unknown route"}})
@@ -598,6 +666,15 @@ class Handler(BaseHTTPRequestHandler):
         session_id = self._header("X-Session-Id")
         device_uid = self._header("X-Device-Uid")
         device_name = self._header("X-Device-Name")
+        client_ip = self._header("X-Forwarded-For", "").split(",")[0].strip() or self.client_address[0]
+        device_ip = self.cfg.echo_device_ip or client_ip
+        self.cfg.store.note_device_ip(device_ip)
+        if self.cfg.device_registry is not None:
+            self.cfg.device_registry.note_seen(
+                device_uid=device_uid,
+                device_name=device_name,
+                ip=device_ip,
+            )
 
         self.cfg.store.begin_stream(
             utterance_id=utterance_id,
@@ -650,6 +727,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = self._route_path()
 
+        if self._try_ui_post(path):
+            return
+
         if path == "/speech/stream":
             self._handle_speech_stream()
             return
@@ -670,6 +750,14 @@ class Handler(BaseHTTPRequestHandler):
             except (KeyError, ValueError, binascii.Error) as exc:
                 self._send_json(400, {"v": 1, "error": {"code": "INVALID_REQUEST", "message": str(exc)}})
                 return
+            if self.cfg.device_registry is not None:
+                client_ip = self.client_address[0]
+                device_ip = self.cfg.echo_device_ip or client_ip
+                self.cfg.device_registry.note_seen(
+                    device_uid=str(payload.get("device_uid", "")),
+                    device_name=str(payload.get("device_name", "")),
+                    ip=device_ip,
+                )
             self._send_json(
                 200,
                 {
@@ -689,15 +777,23 @@ class Handler(BaseHTTPRequestHandler):
 
             utterance_id = str(result.get("utterance_id", ""))
             device_uid = str(result.get("device_uid", ""))
+            client_ip = self.client_address[0]
+            device_ip = self.cfg.echo_device_ip or client_ip
+            if self.cfg.device_registry is not None and device_uid:
+                device_ip = self.cfg.device_registry.resolve_ip(device_uid, device_ip)
+                self.cfg.device_registry.note_seen(
+                    device_uid=device_uid,
+                    device_name=str(result.get("device_name", "")),
+                    ip=device_ip,
+                )
             if utterance_id and device_uid:
                 self.cfg.reply_ctx[utterance_id] = {
                     "device_uid": device_uid,
-                    "device_ip": self.cfg.echo_device_ip or self.client_address[0],
+                    "device_ip": device_ip,
                     "session_id": str(result.get("session_id", "")),
                 }
 
             if self.cfg.echo_enabled and device_uid:
-                device_ip = self.cfg.echo_device_ip or self.client_address[0]
                 pcm_path = Path(result["wav_path"])
                 with wave.open(str(pcm_path), "rb") as wf:
                     pcm = wf.readframes(wf.getnframes())
@@ -707,7 +803,7 @@ class Handler(BaseHTTPRequestHandler):
                         pcm,
                         int(result["sample_rate_hz"]),
                         int(result["channels"]),
-                        self.cfg.echo_auth_token,
+                        device_auth_token(self.cfg, result["device_uid"]),
                         chunk_bytes=self.cfg.play_chunk_bytes,
                     )
 
@@ -746,6 +842,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             device_ip = str(payload.get("device_ip", "")).strip()
+            if not device_ip and self.cfg.device_registry is not None:
+                device_ip = self.cfg.device_registry.resolve_ip(device_uid, "")
             if not device_ip:
                 device_ip = self.cfg.echo_device_ip or self.client_address[0]
 
@@ -758,7 +856,7 @@ class Handler(BaseHTTPRequestHandler):
                 device_uid=device_uid,
                 device_ip=device_ip,
                 prompt_wav_path=str(prompt_wav) if prompt_wav else None,
-                auth_token=self.cfg.echo_auth_token,
+                auth_token=device_auth_token(self.cfg, device_uid),
             )
             self._send_json(
                 200,
@@ -980,6 +1078,16 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Public base URL for OTA manifest links (default: http://<Host>/<prefix>)",
     )
+    parser.add_argument(
+        "--device-ip",
+        default="",
+        help="Default ESP32 device IP for the web admin UI",
+    )
+    parser.add_argument(
+        "--ota-secret",
+        default="",
+        help="Default OTA secret for the web admin UI",
+    )
     return parser.parse_args()
 
 
@@ -1000,10 +1108,17 @@ def main() -> int:
     cfg.firmware_bin_path = args.firmware_bin.strip()
     cfg.firmware_version_override = args.firmware_version.strip()
     cfg.public_base_url = args.public_base_url.strip()
-    firmware_bundle = resolve_firmware_bundle(
-        explicit_bin=cfg.firmware_bin_path or None,
-        version_override=cfg.firmware_version_override or None,
-    )
+
+    firmware_catalog = FirmwareCatalog(here / "uploads" / "firmware")
+    firmware_catalog.import_dist_default()
+    if cfg.firmware_bin_path:
+        firmware_catalog.import_file(
+            Path(cfg.firmware_bin_path),
+            version_override=cfg.firmware_version_override,
+            source="cli",
+        )
+    cfg.firmware_catalog = firmware_catalog
+    firmware_bundle = firmware_catalog.active_bundle()
 
     def tts_playback(
         device_ip: str,
@@ -1073,11 +1188,52 @@ def main() -> int:
         cfg.transcriber.preload()
         cfg.transcriber.start()
 
+    settings_store = BridgeSettingsStore(here / "bridge_settings.json")
+    settings_store.apply_defaults(**settings_defaults_from_env())
+    settings_store.apply_defaults(
+        device_ip=args.device_ip or args.echo_device_ip or "",
+        ota_secret=args.ota_secret or "",
+        auth_token=args.echo_auth_token or "",
+    )
+
+    device_registry = DeviceRegistry(here / "devices.json")
+    env_defaults = settings_defaults_from_env()
+    device_registry.apply_global_defaults(
+        ota_secret=args.ota_secret or env_defaults.get("ota_secret", ""),
+        auth_token=args.echo_auth_token or env_defaults.get("auth_token", ""),
+    )
+    device_registry.migrate_legacy_settings(settings_store.settings)
+    seed_ip = args.device_ip or args.echo_device_ip or settings_store.settings.device_ip
+    if seed_ip and not device_registry.list_devices():
+        device_registry.seed_manual_device(
+            ip=seed_ip,
+            ota_secret=settings_store.settings.ota_secret,
+            auth_token=settings_store.settings.auth_token,
+        )
+    cfg.device_registry = device_registry
+    device_registry.ensure_all_auth_tokens()
+
+    def public_base_url() -> str:
+        if cfg.public_base_url:
+            return cfg.public_base_url.rstrip("/")
+        return f"http://{args.host}:{args.port}{cfg.prefix.rstrip('/')}"
+
+    ui_handlers = BridgeUiHandlers(
+        device_registry,
+        firmware_catalog=firmware_catalog,
+        uploads_dir=here / "uploads",
+        public_base_url_resolver=public_base_url,
+        last_device_ip_getter=lambda: cfg.store.last_device_ip,
+        echo_auth_token_getter=lambda: cfg.echo_auth_token,
+    )
+
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.cfg = cfg  # type: ignore[attr-defined]
+    server.ui_handlers = ui_handlers  # type: ignore[attr-defined]
     server.no_streaming_asr = args.no_streaming_asr  # type: ignore[attr-defined]
 
     print("Hermes-Voice-Bridge", flush=True)
+    print(f"Admin UI -> http://{args.host}:{args.port}{cfg.prefix}/ui", flush=True)
     print(f"Listening on http://{args.host}:{args.port}{cfg.prefix}", flush=True)
     print("Protocol A3 (primary):", flush=True)
     print(f"  POST {cfg.prefix}/speech/stream  (binary PCM, chunked HTTP body + X-* headers)", flush=True)
@@ -1122,10 +1278,12 @@ def main() -> int:
     else:
         print("TTS -> disabled", flush=True)
     if firmware_bundle is not None:
+        active_ver = firmware_catalog.active_version()
+        count = len(firmware_catalog.list_entries())
         print(
             f"OTA host -> {cfg.prefix}/firmware/manifest.json "
-            f"version={firmware_bundle.version} bin={firmware_bundle.bin_path} "
-            f"(re-read on each request; run tools/publish_firmware.sh to deploy)",
+            f"active={active_ver} ({count} firmware(s) in catalog) "
+            f"bin={firmware_bundle.bin_path}",
             flush=True,
         )
     else:

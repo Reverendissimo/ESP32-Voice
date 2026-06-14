@@ -47,6 +47,12 @@ public:
 private:
     static void updateTask(void* arg);
     void runUpdate(const char* firmwareUrl, bool force);
+    bool fetchManifestFromUrl(
+        const char* manifestUrl,
+        char* firmwareUrl,
+        size_t firmwareUrlLen,
+        char* versionOut,
+        size_t versionOutLen);
     bool resolveManifest(char* firmwareUrl, size_t firmwareUrlLen, char* versionOut, size_t versionOutLen);
     bool downloadAndInstall(const char* firmwareUrl);
 

@@ -67,7 +67,7 @@ esp_err_t sendConfig(httpd_req_t* req, const ApiContext* context, const config::
     }
 
     JsonResponseBuilder builder;
-    if (!builder.buildConfig(context->deviceUid, config, dirty, true, body, kResponseBufferSize)) {
+    if (!builder.buildConfig(context->deviceUid, config, dirty, false, body, kResponseBufferSize)) {
         free(body);
         ErrorResponseFactory errors;
         char errBody[256] = {};
