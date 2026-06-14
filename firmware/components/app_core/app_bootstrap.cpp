@@ -179,6 +179,11 @@ bool AppBootstrap::showDeferredIdleScreen() {
 bool AppBootstrap::startHttpServer() {
     const config::AppConfig& activeConfig = m_configManager.active();
     m_authContext.configure(activeConfig.auth.token);
+    m_otaService.configure(
+        activeConfig.ota,
+        activeConfig.network.callbackBaseUrl,
+        &m_audioPlaybackService,
+        &m_utteranceStateMachine);
 
     m_apiContext.deviceUid = m_identity.deviceUid();
     m_apiContext.configManager = &m_configManager;
@@ -186,6 +191,8 @@ bool AppBootstrap::startHttpServer() {
     m_apiContext.timeSyncService = &m_timeSyncService;
     m_apiContext.healthService = &m_healthService;
     m_apiContext.authContext = &m_authContext;
+    m_apiContext.otaService = &m_otaService;
+    m_apiContext.utteranceFsm = &m_utteranceStateMachine;
     m_apiContext.audioPlayback = &m_audioPlaybackService;
     m_apiContext.displayService = &m_displayService;
     m_apiContext.reloadRuntimeConfig = reloadRuntimeConfigTrampoline;
@@ -224,6 +231,7 @@ void AppBootstrap::reloadRuntimeConfig() {
     const config::AppConfig& activeConfig = m_configManager.active();
 
     m_authContext.configure(activeConfig.auth.token);
+    m_otaService.refreshConfig(activeConfig.ota, activeConfig.network.callbackBaseUrl);
     m_vadService.configure(activeConfig.vad);
     m_utteranceStateMachine.configure(&m_audioUploadService, m_sessionId, activeConfig.vad);
     m_audioCaptureService.configure(
@@ -311,6 +319,13 @@ bool AppBootstrap::start() {
 
     if (!startAudioPipeline()) {
         ESP_LOGW(kTag, "audio pipeline start failed");
+    }
+
+    if (!m_httpServer.isRunning()) {
+        ESP_LOGW(kTag, "retrying HTTP server start after audio init");
+        if (!startHttpServer()) {
+            ESP_LOGW(kTag, "HTTP server retry failed");
+        }
     }
 
     // Paint idle screen only after CLI/HTTP are up so a display bug cannot brick recovery.

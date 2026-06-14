@@ -58,6 +58,8 @@ bool configureStation(const char* ssid, const char* password) {
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifiConfig));
+    // MIN_MODEM avoids wifi:m f null under sustained HTTP load (IDF Wi-Fi PS quirk).
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
     ESP_ERROR_CHECK(esp_wifi_start());
     return true;
 }

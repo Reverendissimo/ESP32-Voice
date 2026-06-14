@@ -49,6 +49,7 @@ except ImportError:
     requests = None  # type: ignore
 
 from esp_playback import stream_pcm_to_esp
+from firmware_hosting import FirmwareBundle, manifest_json, resolve_firmware_bundle
 from hermes_client import HermesClient, HermesError, build_hermes_from_args
 from hermes_session import DEFAULT_SESSION_FILE, resolve_active_session
 from ml_runtime import configure_ml_runtime
@@ -398,6 +399,9 @@ class ServerConfig:
     hermes: HermesClient | None = None
     hermes_conversation_id: str = ""
     reply_ctx: dict[str, dict[str, str]]
+    firmware_bin_path: str = ""
+    firmware_version_override: str = ""
+    public_base_url: str = ""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -494,8 +498,54 @@ class Handler(BaseHTTPRequestHandler):
             return path[len(prefix) :] or "/"
         return path
 
+    def _send_bytes(self, code: int, body: bytes, content_type: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _public_base_url(self) -> str:
+        if self.cfg.public_base_url:
+            return self.cfg.public_base_url.rstrip("/")
+        host = self.headers.get("Host", "").strip()
+        if not host:
+            return self.cfg.prefix.rstrip("/")
+        return f"http://{host}{self.cfg.prefix.rstrip('/')}"
+
+    def _resolve_firmware(self) -> FirmwareBundle | None:
+        override = self.cfg.firmware_version_override.strip() or None
+        explicit = self.cfg.firmware_bin_path.strip() or None
+        return resolve_firmware_bundle(explicit_bin=explicit, version_override=override)
+
     def do_GET(self) -> None:
-        if self._route_path() == "/status":
+        path = self._route_path()
+
+        if path == "/firmware/manifest.json":
+            bundle = self._resolve_firmware()
+            if bundle is None:
+                self._send_json(
+                    404,
+                    {"v": 1, "error": {"code": "NOT_FOUND", "message": "Firmware binary not available"}},
+                )
+                return
+            body = manifest_json(bundle=bundle, base_url=self._public_base_url())
+            self._send_bytes(200, body, "application/json")
+            return
+
+        if path == "/firmware/esp32-voice.bin":
+            bundle = self._resolve_firmware()
+            if bundle is None:
+                self._send_json(
+                    404,
+                    {"v": 1, "error": {"code": "NOT_FOUND", "message": "Firmware binary not available"}},
+                )
+                return
+            data = bundle.bin_path.read_bytes()
+            self._send_bytes(200, data, "application/octet-stream")
+            return
+
+        if path == "/status":
             self._send_json(200, {"v": 1, **self.cfg.store.status()})
             return
 
@@ -509,6 +559,8 @@ class Handler(BaseHTTPRequestHandler):
                 f"POST {self.cfg.prefix}/speech/finalize",
                 f"POST {self.cfg.prefix}/tts/speak",
                 f"GET  {self.cfg.prefix}/status",
+                f"GET  {self.cfg.prefix}/firmware/manifest.json",
+                f"GET  {self.cfg.prefix}/firmware/esp32-voice.bin",
                 "",
                 f"Recordings: {status['recordings_dir']}",
                 f"Active utterances: {len(status['active_utterances'])}",
@@ -911,6 +963,21 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=f"Path to active Hermes session file (default: {DEFAULT_SESSION_FILE})",
     )
+    parser.add_argument(
+        "--firmware-bin",
+        default="",
+        help="Path to esp32-voice.bin for OTA hosting (default: dist or firmware/build)",
+    )
+    parser.add_argument(
+        "--firmware-version",
+        default="",
+        help="Override firmware version in OTA manifest (default: read from deployed binary)",
+    )
+    parser.add_argument(
+        "--public-base-url",
+        default="",
+        help="Public base URL for OTA manifest links (default: http://<Host>/<prefix>)",
+    )
     return parser.parse_args()
 
 
@@ -928,6 +995,13 @@ def main() -> int:
     cfg.echo_auth_token = args.echo_auth_token
     cfg.play_chunk_bytes = max(2, args.play_chunk_bytes - (args.play_chunk_bytes % 2))
     cfg.reply_ctx = {}
+    cfg.firmware_bin_path = args.firmware_bin.strip()
+    cfg.firmware_version_override = args.firmware_version.strip()
+    cfg.public_base_url = args.public_base_url.strip()
+    firmware_bundle = resolve_firmware_bundle(
+        explicit_bin=cfg.firmware_bin_path or None,
+        version_override=cfg.firmware_version_override or None,
+    )
 
     def tts_playback(
         device_ip: str,
@@ -1044,6 +1118,15 @@ def main() -> int:
         )
     else:
         print("TTS -> disabled", flush=True)
+    if firmware_bundle is not None:
+        print(
+            f"OTA host -> {cfg.prefix}/firmware/manifest.json "
+            f"version={firmware_bundle.version} bin={firmware_bundle.bin_path} "
+            f"(re-read on each request; run tools/publish_firmware.sh to deploy)",
+            flush=True,
+        )
+    else:
+        print("OTA host -> no firmware binary (run tools/publish_firmware.sh after build)", flush=True)
     print("", flush=True)
     print("On the BOX serial CLI (use your PC/LAN IP):", flush=True)
     print(f"  callback_base_set http://YOUR_LAN_IP:{args.port}{cfg.prefix}", flush=True)

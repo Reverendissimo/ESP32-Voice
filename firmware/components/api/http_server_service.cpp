@@ -21,12 +21,17 @@ bool HttpServerService::start(uint16_t port, const ApiContext* context) {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = port;
-    config.max_uri_handlers = 32;
+    config.max_uri_handlers = 40;
     config.lru_purge_enable = true;
     // Default 4KB httpd stack overflows on config/health JSON and /play body parsing.
     config.stack_size = 6144;
     config.core_id = 0;
     config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    config.recv_wait_timeout = 15;
+    config.send_wait_timeout = 15;
+    config.keep_alive_enable = false;
+    // LWIP_MAX_SOCKETS=8 → httpd allows at most 5 (3 reserved internally).
+    config.max_open_sockets = 5;
 
     const esp_err_t err = httpd_start(&m_server, &config);
     if (err != ESP_OK) {

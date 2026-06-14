@@ -82,6 +82,12 @@ void printConfig(const config::AppConfig& config, bool dirty) {
     printf("vad_post_roll_padding_ms: %u\n", static_cast<unsigned>(config.vad.postRollPaddingMs));
     printf("timezone: %s\n", config.time.timezone);
     printf("sntp_server: %s\n", config.time.sntpServer);
+    printMaskedSecret("ota_secret", config.ota.secret);
+    if (config.ota.manifestUrl[0] != '\0') {
+        printf("ota_manifest_url: %s\n", config.ota.manifestUrl);
+    } else {
+        printf("ota_manifest_url: (derived from callback_base_url)\n");
+    }
     printf("dirty: %s\n", dirty ? "yes" : "no");
 }
 
@@ -154,6 +160,7 @@ int cmdHelp(int argc, char** argv) {
         "  wifi_test\n"
         "  device_name_set <name>\n"
         "  auth_set <token>\n"
+        "  ota_secret_set <secret>\n"
         "  callback_base_set <url>\n"
         "  callbacks_set <speech_url> <finalize_url>\n"
         "  ui_event_url_set <url>\n"
@@ -305,6 +312,31 @@ int cmdAuthSet(int argc, char** argv) {
     }
     cJSON_Delete(root);
     printf("auth token updated in active config\n");
+    return 0;
+}
+
+int cmdOtaSecretSet(int argc, char** argv) {
+    if (argc < 2) {
+        printf("Usage: ota_secret_set <secret>\n");
+        return 1;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* ota = cJSON_AddObjectToObject(root, "ota");
+    if (ota == nullptr) {
+        cJSON_Delete(root);
+        return 1;
+    }
+    cJSON_AddStringToObject(ota, "secret", argv[1]);
+
+    char error[128] = {};
+    if (!applyPatchJson(root, error, sizeof(error))) {
+        cJSON_Delete(root);
+        printf("ota_secret_set failed: %s\n", error[0] != '\0' ? error : "unknown error");
+        return 1;
+    }
+    cJSON_Delete(root);
+    printf("OTA secret updated in active config (run config_save to persist)\n");
     return 0;
 }
 
@@ -886,6 +918,7 @@ bool CliCommandRegistry::registerCommands(const CliContext* context) const {
            registerCommand("wifi_test", "Test active Wi-Fi credentials", cmdWifiTest) &&
            registerCommand("device_name_set", "device_name_set <name>", cmdDeviceNameSet) &&
            registerCommand("auth_set", "auth_set <token>", cmdAuthSet) &&
+           registerCommand("ota_secret_set", "ota_secret_set <secret>", cmdOtaSecretSet) &&
            registerCommand("callback_base_set", "callback_base_set <url>", cmdCallbackBaseSet) &&
            registerCommand("callbacks_set", "callbacks_set <speech_url> <finalize_url>", cmdCallbacksSet) &&
            registerCommand("ui_event_url_set", "ui_event_url_set <url>", cmdUiEventUrlSet) &&

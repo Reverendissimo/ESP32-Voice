@@ -18,8 +18,9 @@ static const char* kTag = "audio_playback";
 
 namespace {
 
-constexpr size_t kCodecWriteBytes = 512;
-constexpr int kEnqueueTimeoutMs = 2000;
+constexpr size_t kCodecWriteBytes = 2048;
+constexpr int kEnqueueTimeoutMs = 150;
+constexpr int kPlaybackTaskPriority = 7;
 constexpr uint32_t kTailPollsBeforeDrain = 50;
 
 void amplifyPcm(int16_t* samples, size_t count, float gain) {
@@ -109,7 +110,7 @@ bool AudioPlaybackService::start() {
         "audio_play",
         4096,
         this,
-        4,
+        kPlaybackTaskPriority,
         reinterpret_cast<TaskHandle_t*>(&m_taskHandle));
     if (created != pdPASS) {
         m_running = false;
@@ -208,6 +209,26 @@ size_t AudioPlaybackService::readRing(uint8_t* out, size_t maxBytes) {
     return chunk;
 }
 
+void AudioPlaybackService::wakePlaybackTask() {
+    if (m_taskHandle != nullptr) {
+        xTaskNotifyGive(static_cast<TaskHandle_t>(m_taskHandle));
+    }
+}
+
+void AudioPlaybackService::preparePlayback(uint16_t sampleRateHz, uint8_t channels) {
+    setCapturePaused(m_capture, true);
+    if (m_board != nullptr && m_board->isMicrophoneOpen()) {
+        m_board->closeMicrophone();
+        m_micSuspendedForPlayback = true;
+    }
+    if (!m_streamFormatSet) {
+        m_streamSampleRateHz = sampleRateHz;
+        m_streamChannels = channels;
+        m_streamFormatSet = true;
+    }
+    wakePlaybackTask();
+}
+
 bool AudioPlaybackService::enqueueDecodedPcm(
     int16_t* samples,
     size_t sampleCount,
@@ -223,9 +244,10 @@ bool AudioPlaybackService::enqueueDecodedPcm(
     }
 
     if (!m_streamFormatSet) {
-        m_streamSampleRateHz = sampleRateHz;
-        m_streamChannels = channels;
-        m_streamFormatSet = true;
+        preparePlayback(sampleRateHz, channels);
+    } else {
+        setCapturePaused(m_capture, true);
+        wakePlaybackTask();
     }
     m_expectMoreChunks = !streamEnd;
 
@@ -243,6 +265,7 @@ bool AudioPlaybackService::enqueueDecodedPcm(
 
 void AudioPlaybackService::endStream() {
     m_expectMoreChunks = false;
+    wakePlaybackTask();
 }
 
 bool AudioPlaybackService::enqueuePcm(
@@ -259,9 +282,10 @@ bool AudioPlaybackService::enqueuePcm(
     }
 
     if (!m_streamFormatSet) {
-        m_streamSampleRateHz = sampleRateHz;
-        m_streamChannels = channels;
-        m_streamFormatSet = true;
+        preparePlayback(sampleRateHz, channels);
+    } else {
+        setCapturePaused(m_capture, true);
+        wakePlaybackTask();
     }
 
     const size_t byteLen = sampleCount * sizeof(int16_t);
@@ -310,23 +334,41 @@ void AudioPlaybackService::drainSpeaker(esp_codec_dev_handle_t speaker) {
     if (speaker == nullptr) {
         return;
     }
-    int16_t silence[256] = {};
-    for (int i = 0; i < 4; ++i) {
+    int16_t silence[512] = {};
+    for (int i = 0; i < 8; ++i) {
         (void)esp_codec_dev_write(speaker, silence, static_cast<int>(sizeof(silence)));
     }
+}
+
+void AudioPlaybackService::reopenMicrophone() {
+    if (m_board == nullptr || !m_micSuspendedForPlayback || m_board->isMicrophoneOpen()) {
+        return;
+    }
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (m_board->openMicrophone(m_defaultSampleRateHz, m_defaultChannels)) {
+            m_micSuspendedForPlayback = false;
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(kTag, "mic reopen failed after playback");
+    m_micSuspendedForPlayback = false;
 }
 
 void AudioPlaybackService::onPlaybackIdle() {
     if (m_board == nullptr) {
         setCapturePaused(m_capture, false);
         m_expectMoreChunks = false;
+        m_micSuspendedForPlayback = false;
         return;
     }
     if (m_board->isSpeakerOpen()) {
         drainSpeaker(m_board->speaker());
         vTaskDelay(pdMS_TO_TICKS(40));
         m_board->closeSpeaker();
+        vTaskDelay(pdMS_TO_TICKS(120));
     }
+    reopenMicrophone();
     setCapturePaused(m_capture, false);
     m_streamFormatSet = false;
     m_expectMoreChunks = false;
@@ -350,7 +392,7 @@ void AudioPlaybackService::runPlaybackLoop() {
         if (pending == 0) {
             if (m_playing) {
                 if (m_expectMoreChunks) {
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
                     continue;
                 }
                 ++idlePolls;
@@ -359,10 +401,10 @@ void AudioPlaybackService::runPlaybackLoop() {
                     onPlaybackIdle();
                     idlePolls = 0;
                 } else {
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
                 }
             } else {
-                vTaskDelay(pdMS_TO_TICKS(10));
+                (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
             }
             continue;
         }
@@ -370,7 +412,6 @@ void AudioPlaybackService::runPlaybackLoop() {
 
         if (!m_playing) {
             m_playing = true;
-            setCapturePaused(m_capture, true);
             if (!m_board->openSpeaker(m_streamSampleRateHz, m_streamChannels)) {
                 ESP_LOGW(kTag, "speaker open failed");
                 m_playing = false;

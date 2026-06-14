@@ -3,6 +3,7 @@
  * @brief Firmware entry point for ESP32-S3-BOX-3 voice terminal.
  */
 #include "app_bootstrap.hpp"
+#include "ota_service.hpp"
 
 #include "esp_app_desc.h"
 #include "esp_log.h"
@@ -12,6 +13,8 @@
 static const char* kTag = "app_main";
 
 extern "C" void app_main(void) {
+    OtaService::validateRunningImageOnBoot();
+
     const esp_app_desc_t* appDesc = esp_app_get_description();
     ESP_LOGI(
         kTag,

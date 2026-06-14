@@ -57,6 +57,10 @@ esp_err_t sendJsonResponse(httpd_req_t* req, int statusCode, const char* jsonBod
         httpd_resp_set_status(req, "404 Not Found");
     } else if (statusCode == 501) {
         httpd_resp_set_status(req, "501 Not Implemented");
+    } else if (statusCode == 503) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+    } else if (statusCode == 202) {
+        httpd_resp_set_status(req, "202 Accepted");
     } else if (statusCode >= 500) {
         httpd_resp_set_status(req, "500 Internal Server Error");
     }

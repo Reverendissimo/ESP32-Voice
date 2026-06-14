@@ -97,6 +97,11 @@ struct DiagnosticsConfig {
     uint16_t recentLogCapacity;
 };
 
+struct OtaConfig {
+    char secret[64];
+    char manifestUrl[128];
+};
+
 struct AppConfig {
     uint32_t schemaVersion;
     IdentityConfig identity;
@@ -113,6 +118,7 @@ struct AppConfig {
     EnvironmentAlarmConfig environmentAlarm;
     TimeConfig time;
     DiagnosticsConfig diagnostics;
+    OtaConfig ota;
 };
 
 /**

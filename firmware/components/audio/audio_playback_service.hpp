@@ -53,9 +53,12 @@ public:
 private:
     static void playbackTask(void* arg);
     void runPlaybackLoop();
+    void preparePlayback(uint16_t sampleRateHz, uint8_t channels);
+    void wakePlaybackTask();
     bool writeRing(const uint8_t* data, size_t byteLen, TickType_t timeoutTicks);
     size_t readRing(uint8_t* out, size_t maxBytes);
     void drainSpeaker(esp_codec_dev_handle_t speaker);
+    void reopenMicrophone();
     void onPlaybackIdle();
 
     Box3AudioBoard* m_board = nullptr;
@@ -75,6 +78,7 @@ private:
     uint16_t m_streamSampleRateHz = audio::kDefaultSampleRateHz;
     uint8_t m_streamChannels = audio::kDefaultChannels;
     bool m_streamFormatSet = false;
+    bool m_micSuspendedForPlayback = false;
     uint8_t m_volumePercent = audio::kDefaultPlaybackVolumePercent;
     float m_pcmGain = 2.5f;
 };

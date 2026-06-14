@@ -18,6 +18,7 @@
 #include "device_identity.hpp"
 #include "health_service.hpp"
 #include "http_server_service.hpp"
+#include "ota_service.hpp"
 #include "serial_cli_service.hpp"
 #include "time_sync_service.hpp"
 #include "ui_event_client.hpp"
@@ -63,6 +64,7 @@ private:
     TimeSyncService m_timeSyncService;
     HealthService m_healthService;
     AuthContext m_authContext;
+    OtaService m_otaService;
     HttpServerService m_httpServer;
     SerialCliService m_serialCli;
     DisplayService m_displayService;

@@ -10,6 +10,7 @@
 #include "routes/health_route.hpp"
 #include "routes/display_route.hpp"
 #include "routes/play_route.hpp"
+#include "routes/ota_route.hpp"
 #include "routes/version_route.hpp"
 
 namespace {
@@ -43,10 +44,11 @@ bool RouteRegistry::registerAll(httpd_handle_t server, const ApiContext* context
     ConfigRoute configRoute;
     PlayRoute playRoute;
     DisplayRoute displayRoute;
+    OtaRoute otaRoute;
 
     if (!healthRoute.registerRoutes(server, context) || !versionRoute.registerRoutes(server, context) ||
         !configRoute.registerRoutes(server, context) || !playRoute.registerRoutes(server, context) ||
-        !displayRoute.registerRoutes(server, context)) {
+        !displayRoute.registerRoutes(server, context) || !otaRoute.registerRoutes(server, context)) {
         return false;
     }
 

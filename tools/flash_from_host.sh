@@ -38,11 +38,13 @@ if [[ "$ERASE" == "--erase" || "$ERASE" == "erase" ]]; then
 fi
 
 echo "Flashing to $PORT (mode=$FLASH_MODE) ..."
+echo "Note: first OTA partition flash must include partition-table.bin (one-time migration)."
 "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" -b "$BAUD" \
   --before default-reset --after no-reset write-flash \
   --flash-mode "$FLASH_MODE" --flash-freq 80m --flash-size 16MB \
   0x0 "$BUNDLE_DIR/bootloader.bin" \
   0x10000 "$BUNDLE_DIR/partition-table.bin" \
+  0x17000 "$BUNDLE_DIR/ota_data_initial.bin" \
   0x20000 "$BUNDLE_DIR/esp32-voice.bin"
 
 echo "Done. Press RESET on the BOX-3, wait 3s, then monitor WITHOUT toggling DTR/RTS:"

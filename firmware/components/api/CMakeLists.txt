@@ -14,9 +14,10 @@ idf_component_register(
         "routes/environment_route.cpp"
         "routes/ir_route.cpp"
         "routes/time_route.cpp"
+        "routes/ota_route.cpp"
     INCLUDE_DIRS
         "."
         "routes"
     REQUIRES
-        esp_http_server json config network diagnostics esp_app_format audio display mbedtls
+        esp_http_server json config network diagnostics esp_app_format audio display mbedtls ota
 )

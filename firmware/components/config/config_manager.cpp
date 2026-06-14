@@ -174,6 +174,18 @@ bool ConfigManager::applyPatchObject(const cJSON* patch, char* errorOut, size_t 
         }
     }
 
+    const cJSON* ota = cJSON_GetObjectItemCaseSensitive(patch, "ota");
+    if (cJSON_IsObject(ota)) {
+        const cJSON* secret = cJSON_GetObjectItemCaseSensitive(ota, "secret");
+        const cJSON* manifestUrl = cJSON_GetObjectItemCaseSensitive(ota, "manifestUrl");
+        if (cJSON_IsString(secret)) {
+            copyString(candidate.ota.secret, sizeof(candidate.ota.secret), secret->valuestring);
+        }
+        if (cJSON_IsString(manifestUrl)) {
+            copyString(candidate.ota.manifestUrl, sizeof(candidate.ota.manifestUrl), manifestUrl->valuestring);
+        }
+    }
+
     if (!m_validator.validateConfig(candidate, errorOut, errorOutLen)) {
         return false;
     }

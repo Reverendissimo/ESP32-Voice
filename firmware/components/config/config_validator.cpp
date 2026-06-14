@@ -160,5 +160,13 @@ bool ConfigValidator::validatePatch(const cJSON* patch, char* errorOut, size_t e
         }
     }
 
+    const cJSON* ota = cJSON_GetObjectItemCaseSensitive(patch, "ota");
+    if (ota != nullptr) {
+        if (!cJSON_IsObject(ota) || !isStringField(ota, "secret") || !isStringField(ota, "manifestUrl")) {
+            setError(errorOut, errorOutLen, "Invalid ota patch");
+            return false;
+        }
+    }
+
     return true;
 }

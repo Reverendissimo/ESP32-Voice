@@ -63,7 +63,7 @@ private:
         int8_t poolSlot;
     };
 
-    static void freeJobPcm(UploadJob& job);
+    void freeJobPcm(UploadJob& job);
     static void uploadTask(void* arg);
     void runUploadLoop();
     bool postFinalizeJson(const char* body);

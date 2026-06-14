@@ -5,5 +5,5 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
-        nvs_flash esp_psram esp_event config network diagnostics api cli audio display
+        nvs_flash esp_psram esp_event config network diagnostics api cli audio display ota
 )

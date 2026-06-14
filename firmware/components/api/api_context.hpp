@@ -16,7 +16,9 @@ class AuthContext;
 class DisplayService;
 class ConfigManager;
 class HealthService;
+class OtaService;
 class TimeSyncService;
+class UtteranceStateMachine;
 class WifiManager;
 
 /**
@@ -29,6 +31,8 @@ struct ApiContext {
     TimeSyncService* timeSyncService;
     HealthService* healthService;
     AuthContext* authContext;
+    OtaService* otaService;
+    UtteranceStateMachine* utteranceFsm;
     AudioPlaybackService* audioPlayback;
     DisplayService* displayService;
     void (*reloadRuntimeConfig)(void* context);

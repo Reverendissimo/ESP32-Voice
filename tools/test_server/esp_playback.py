@@ -42,7 +42,7 @@ def stream_pcm_to_esp(
         return False
 
     url = f"http://{device_ip}/api/v1/play"
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "Connection": "close"}
     if auth_token:
         headers["X-Auth-Token"] = auth_token
 
@@ -75,14 +75,17 @@ def stream_pcm_to_esp(
     chunk_idx = 0
     ring_free = RING_CAPACITY_BYTES
     ring_capacity = RING_CAPACITY_BYTES
+    ring_stalled = False
     ok = True
 
     while sent < total:
-        while ring_free < low_water_bytes and sent < total:
-            time.sleep(0.05)
-            ring_free = min(ring_capacity, ring_free + int(bytes_per_sec * 0.05))
-
         piece = pcm[sent : sent + chunk_bytes]
+        needed = len(piece) if ring_stalled else low_water_bytes
+        while ring_free < needed:
+            time.sleep(0.2 if ring_stalled else 0.05)
+            if not ring_stalled:
+                ring_free = min(ring_capacity, ring_free + int(bytes_per_sec * 0.05))
+
         is_last = sent + len(piece) >= total
         end_stream = stream_end if stream_end is not None else is_last
         body = {
@@ -115,6 +118,7 @@ def stream_pcm_to_esp(
                     _, ring_free, ring_capacity = _ring_stats(payload)
                 except ValueError:
                     ring_free = max(0, ring_free - len(piece))
+                ring_stalled = False
                 posted = True
                 print(
                     f"{log_prefix} chunk {chunk_idx} ok ({len(piece)} bytes, "
@@ -124,6 +128,8 @@ def stream_pcm_to_esp(
                 break
 
             if resp.status_code == 503:
+                ring_stalled = True
+                ring_free = 0
                 time.sleep(min(retry_sleep_s * (attempt + 1), 1.0))
                 continue
 

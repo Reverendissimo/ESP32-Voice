@@ -59,6 +59,11 @@ void writeTime(const config::TimeConfig& time, cJSON* root) {
     cJSON_AddNumberToObject(root, "syncIntervalSec", time.syncIntervalSec);
 }
 
+void writeOta(const config::OtaConfig& ota, cJSON* root) {
+    cJSON_AddStringToObject(root, "secret", ota.secret);
+    cJSON_AddStringToObject(root, "manifestUrl", ota.manifestUrl);
+}
+
 bool readIdentity(const cJSON* root, config::IdentityConfig& identity) {
     const cJSON* deviceName = cJSON_GetObjectItemCaseSensitive(root, "deviceName");
     if (cJSON_IsString(deviceName)) {
@@ -135,6 +140,18 @@ bool readTime(const cJSON* root, config::TimeConfig& time) {
     return true;
 }
 
+bool readOta(const cJSON* root, config::OtaConfig& ota) {
+    const cJSON* secret = cJSON_GetObjectItemCaseSensitive(root, "secret");
+    const cJSON* manifestUrl = cJSON_GetObjectItemCaseSensitive(root, "manifestUrl");
+    if (cJSON_IsString(secret)) {
+        copyString(ota.secret, sizeof(ota.secret), secret->valuestring);
+    }
+    if (cJSON_IsString(manifestUrl)) {
+        copyString(ota.manifestUrl, sizeof(ota.manifestUrl), manifestUrl->valuestring);
+    }
+    return true;
+}
+
 cJSON* configToJson(const config::AppConfig& config) {
     cJSON* root = cJSON_CreateObject();
     if (root == nullptr) {
@@ -149,6 +166,7 @@ cJSON* configToJson(const config::AppConfig& config) {
     cJSON* network = cJSON_AddObjectToObject(root, "network");
     cJSON* callbacks = cJSON_AddObjectToObject(root, "callbacks");
     cJSON* time = cJSON_AddObjectToObject(root, "time");
+    cJSON* ota = cJSON_AddObjectToObject(root, "ota");
 
     if (identity != nullptr) {
         writeIdentity(config.identity, identity);
@@ -167,6 +185,9 @@ cJSON* configToJson(const config::AppConfig& config) {
     }
     if (time != nullptr) {
         writeTime(config.time, time);
+    }
+    if (ota != nullptr) {
+        writeOta(config.ota, ota);
     }
 
   cJSON* vad = cJSON_AddObjectToObject(root, "vad");
@@ -196,6 +217,7 @@ bool jsonToConfig(const cJSON* root, config::AppConfig& config) {
     const cJSON* network = cJSON_GetObjectItemCaseSensitive(root, "network");
     const cJSON* callbacks = cJSON_GetObjectItemCaseSensitive(root, "callbacks");
     const cJSON* time = cJSON_GetObjectItemCaseSensitive(root, "time");
+    const cJSON* ota = cJSON_GetObjectItemCaseSensitive(root, "ota");
     const cJSON* vad = cJSON_GetObjectItemCaseSensitive(root, "vad");
 
     if (cJSON_IsObject(identity)) {
@@ -215,6 +237,9 @@ bool jsonToConfig(const cJSON* root, config::AppConfig& config) {
     }
     if (cJSON_IsObject(time)) {
         readTime(time, config.time);
+    }
+    if (cJSON_IsObject(ota)) {
+        readOta(ota, config.ota);
     }
     if (cJSON_IsObject(vad)) {
         const cJSON* speechStartThreshold = cJSON_GetObjectItemCaseSensitive(vad, "speechStartThreshold");

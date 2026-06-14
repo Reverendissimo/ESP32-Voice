@@ -50,4 +50,18 @@ void resolveCallbacks(const AppConfig& config, CallbacksConfig& out) {
     }
 }
 
+void resolveOtaManifestUrl(const AppConfig& config, char* out, size_t outLen) {
+    if (out == nullptr || outLen == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (config.ota.manifestUrl[0] != '\0') {
+        copyString(out, outLen, config.ota.manifestUrl);
+        return;
+    }
+    if (config.network.callbackBaseUrl[0] != '\0') {
+        appendPath(out, outLen, config.network.callbackBaseUrl, "/firmware/manifest.json");
+    }
+}
+
 }  // namespace config

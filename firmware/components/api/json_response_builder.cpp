@@ -23,6 +23,7 @@ void addConfigObject(cJSON* configObject, const config::AppConfig& config, bool 
     cJSON* callbacks = cJSON_AddObjectToObject(configObject, "callbacks");
     cJSON* vad = cJSON_AddObjectToObject(configObject, "vad");
     cJSON* time = cJSON_AddObjectToObject(configObject, "time");
+    cJSON* ota = cJSON_AddObjectToObject(configObject, "ota");
 
     if (identity != nullptr) {
         cJSON_AddStringToObject(identity, "deviceName", config.identity.deviceName);
@@ -60,6 +61,14 @@ void addConfigObject(cJSON* configObject, const config::AppConfig& config, bool 
         cJSON_AddStringToObject(time, "timezone", config.time.timezone);
         cJSON_AddStringToObject(time, "sntpServer", config.time.sntpServer);
         cJSON_AddNumberToObject(time, "syncIntervalSec", config.time.syncIntervalSec);
+    }
+    if (ota != nullptr) {
+        cJSON_AddBoolToObject(ota, "enabled", config.ota.secret[0] != '\0');
+        cJSON_AddStringToObject(
+            ota,
+            "secret",
+            (maskSecrets && config.ota.secret[0] != '\0') ? kMaskedSecret : config.ota.secret);
+        cJSON_AddStringToObject(ota, "manifestUrl", config.ota.manifestUrl);
     }
 
     cJSON_AddNumberToObject(configObject, "schemaVersion", config.schemaVersion);

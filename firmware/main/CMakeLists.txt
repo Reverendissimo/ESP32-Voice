@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "app_main.cpp" "early_boot_log.c" "fix_spi_flash_mmap.c"
     INCLUDE_DIRS "."
-    REQUIRES app_core esp_app_format spi_flash
+    REQUIRES app_core esp_app_format spi_flash ota
     WHOLE_ARCHIVE
 )
 
