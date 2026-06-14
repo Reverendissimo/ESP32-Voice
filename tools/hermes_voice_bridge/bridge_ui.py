@@ -16,6 +16,18 @@ from firmware_hosting import FirmwareBundle
 
 _ADMIN_HTML_PATH = Path(__file__).resolve().parent / "static" / "admin.html"
 _MASKED = "***"
+_UI_POST_PATHS = frozenset({
+    "/ui/settings",
+    "/ui/devices/select",
+    "/ui/devices",
+    "/ui/devices/remove",
+    "/ui/firmware/select",
+    "/ui/firmware/apply",
+    "/ui/device/config/patch",
+    "/ui/device/config/save",
+    "/ui/device/config/load",
+    "/ui/device/ota/trigger",
+})
 
 
 def load_admin_html() -> bytes:

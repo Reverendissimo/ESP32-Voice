@@ -51,7 +51,7 @@ except ImportError:
     requests = None  # type: ignore
 
 from bridge_settings import BridgeSettingsStore, settings_defaults_from_env
-from bridge_ui import BridgeUiHandlers
+from bridge_ui import BridgeUiHandlers, _UI_POST_PATHS
 from device_registry import DeviceRegistry
 from esp_playback import stream_pcm_to_esp
 from firmware_catalog import FirmwareCatalog
@@ -606,6 +606,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return True
 
+        if path not in _UI_POST_PATHS:
+            return False
+
         length = int(self.headers.get("Content-Length", "0") or "0")
         body = self.rfile.read(length) if length > 0 else b""
         result = ui.handle_post(path, body, self.headers)
@@ -793,35 +796,42 @@ class Handler(BaseHTTPRequestHandler):
                     "session_id": str(result.get("session_id", "")),
                 }
 
-            if self.cfg.echo_enabled and device_uid:
-                pcm_path = Path(result["wav_path"])
-                with wave.open(str(pcm_path), "rb") as wf:
-                    pcm = wf.readframes(wf.getnframes())
-                    echo_playback(
-                        device_ip,
-                        result["device_uid"],
-                        pcm,
-                        int(result["sample_rate_hz"]),
-                        int(result["channels"]),
-                        device_auth_token(self.cfg, result["device_uid"]),
-                        chunk_bytes=self.cfg.play_chunk_bytes,
-                    )
-
-            if self.cfg.transcriber is not None and result.get("utterance_id"):
-                utterance_id = str(result["utterance_id"])
-                if getattr(self.server, "no_streaming_asr", False):
-                    with wave.open(str(result["wav_path"]), "rb") as wf:
-                        pcm = wf.readframes(wf.getnframes())
-                    self.cfg.transcriber.load_pcm_and_finalize(
-                        utterance_id,
-                        pcm,
-                        sample_rate_hz=int(result["sample_rate_hz"]),
-                        channels=int(result["channels"]),
-                    )
-                else:
-                    self.cfg.transcriber.finalize_utterance(utterance_id)
-
+            # ESP finalize waits only ~5s; reply before echo/ASR work.
             self._send_json(200, {"v": 1, **result})
+
+            def post_finalize() -> None:
+                if self.cfg.echo_enabled and device_uid:
+                    pcm_path = Path(result["wav_path"])
+                    with wave.open(str(pcm_path), "rb") as wf:
+                        pcm = wf.readframes(wf.getnframes())
+                        echo_playback(
+                            device_ip,
+                            result["device_uid"],
+                            pcm,
+                            int(result["sample_rate_hz"]),
+                            int(result["channels"]),
+                            device_auth_token(self.cfg, result["device_uid"]),
+                            chunk_bytes=self.cfg.play_chunk_bytes,
+                        )
+
+                if self.cfg.transcriber is not None and utterance_id:
+                    if getattr(self.server, "no_streaming_asr", False):
+                        with wave.open(str(result["wav_path"]), "rb") as wf:
+                            pcm = wf.readframes(wf.getnframes())
+                        self.cfg.transcriber.load_pcm_and_finalize(
+                            utterance_id,
+                            pcm,
+                            sample_rate_hz=int(result["sample_rate_hz"]),
+                            channels=int(result["channels"]),
+                        )
+                    else:
+                        self.cfg.transcriber.finalize_utterance(utterance_id)
+
+            threading.Thread(
+                target=post_finalize,
+                name=f"finalize-{utterance_id or 'unknown'}",
+                daemon=True,
+            ).start()
             return
 
         if path == "/tts/speak":
