@@ -21,6 +21,12 @@
 
 static const char* kTag = "audio_capture";
 
+namespace {
+
+constexpr BaseType_t kAudioTaskCore = 1;
+
+}  // namespace
+
 void AudioCaptureService::configure(
     Box3AudioBoard* board,
     VadService* vad,
@@ -92,13 +98,14 @@ bool AudioCaptureService::start() {
     m_maxSampleAbs = 0;
     m_running = true;
 
-    const BaseType_t created = xTaskCreate(
+    const BaseType_t created = xTaskCreatePinnedToCore(
         captureTask,
         "audio_cap",
         6144,
         this,
         5,
-        reinterpret_cast<TaskHandle_t*>(&m_taskHandle));
+        reinterpret_cast<TaskHandle_t*>(&m_taskHandle),
+        kAudioTaskCore);
     if (created != pdPASS) {
         m_running = false;
         ESP_LOGE(
@@ -110,12 +117,13 @@ bool AudioCaptureService::start() {
 
     ESP_LOGI(
         kTag,
-        "capture started %u Hz frame_bytes=%u hw_channels=%u pre_roll_ms=%u post_roll_ms=%u",
+        "capture started %u Hz frame_bytes=%u hw_channels=%u pre_roll_ms=%u post_roll_ms=%u core=%d",
         static_cast<unsigned>(m_audio.sampleRateHz),
         static_cast<unsigned>(audio::kBytesPerFrame),
         static_cast<unsigned>(hwChannels),
         static_cast<unsigned>(m_vadConfig.preRollPaddingMs),
-        static_cast<unsigned>(m_vadConfig.postRollPaddingMs));
+        static_cast<unsigned>(m_vadConfig.postRollPaddingMs),
+        static_cast<int>(kAudioTaskCore));
     return true;
 }
 

@@ -21,6 +21,7 @@ namespace {
 constexpr size_t kCodecWriteBytes = 4096;
 constexpr int kEnqueueTimeoutMs = 150;
 constexpr int kPlaybackTaskPriority = 7;
+constexpr BaseType_t kAudioTaskCore = 1;
 constexpr uint32_t kTailPollsBeforeDrain = 50;
 constexpr uint32_t kStreamTailTimeoutPolls = 500;
 
@@ -119,13 +120,14 @@ bool AudioPlaybackService::start() {
     }
 
     m_running = true;
-    const BaseType_t created = xTaskCreate(
+    const BaseType_t created = xTaskCreatePinnedToCore(
         playbackTask,
         "audio_play",
         8192,
         this,
         kPlaybackTaskPriority,
-        reinterpret_cast<TaskHandle_t*>(&m_taskHandle));
+        reinterpret_cast<TaskHandle_t*>(&m_taskHandle),
+        kAudioTaskCore);
     if (created != pdPASS) {
         m_running = false;
         ESP_LOGE(kTag, "playback task create failed");
@@ -134,8 +136,9 @@ bool AudioPlaybackService::start() {
 
     ESP_LOGI(
         kTag,
-        "playback worker started ring_bytes=%u",
-        static_cast<unsigned>(m_ringCapacity));
+        "playback worker started ring_bytes=%u core=%d",
+        static_cast<unsigned>(m_ringCapacity),
+        static_cast<int>(kAudioTaskCore));
     return true;
 }
 
