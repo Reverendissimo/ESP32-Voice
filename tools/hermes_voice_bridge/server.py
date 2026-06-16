@@ -387,15 +387,11 @@ def handle_voice_reply(
                     stream_end=True,
                 )
             elif tts_started and cfg.tts is not None:
-                stream_pcm_to_esp(
-                    device_ip,
-                    device_uid,
-                    b"",
-                    16000,
-                    1,
-                    device_auth_token(cfg, device_uid),
-                    stream_end=True,
-                    log_prefix="[tts]",
+                cfg.tts.speak_stream_end(
+                    utterance_id,
+                    device_uid=device_uid,
+                    device_ip=device_ip,
+                    auth_token=device_auth_token(cfg, device_uid),
                 )
             return
 
@@ -420,7 +416,7 @@ class ServerConfig:
     echo_enabled: bool = False
     echo_device_ip: str = ""
     echo_auth_token: str = ""
-    play_chunk_bytes: int = 12288
+    play_chunk_bytes: int = 24576
     transcriber: WhisperTranscriber | None = None
     tts: ChatterboxTtsEngine | None = None
     hermes: HermesClient | None = None
@@ -908,8 +904,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--play-chunk-bytes",
         type=int,
-        default=12288,
-        help="PCM bytes per /play POST (default: 12288, ~384 ms @ 16 kHz)",
+        default=24576,
+        help="PCM bytes per /play POST (default: 24576, ~768 ms @ 16 kHz)",
     )
     parser.add_argument(
         "--no-hermes-stream",

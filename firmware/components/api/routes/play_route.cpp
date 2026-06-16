@@ -22,8 +22,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// JSON + base64 overhead for 12288-byte PCM chunks.
-static constexpr size_t kRequestBodyMax = 22 * 1024;
+// JSON + base64 overhead for 24 KiB PCM chunks; binary PCM uses pcm buffer only.
+static constexpr size_t kJsonBodyMax = 36 * 1024;
 static constexpr size_t kDecodedPcmMax = audio::kMaxPlaybackBytes;
 
 static const char* kTag = "play_route";
@@ -31,8 +31,8 @@ static const char* kTag = "play_route";
 namespace {
 
 struct PlayBuffers {
-    char* body = nullptr;
-    uint8_t* decoded = nullptr;
+    uint8_t* pcm = nullptr;
+    char* jsonBody = nullptr;
     SemaphoreHandle_t mutex = nullptr;
 };
 
@@ -41,37 +41,43 @@ PlayBuffers& playBuffers() {
     return buffers;
 }
 
-bool ensurePlayBuffers() {
+bool ensureMutex() {
     auto& buffers = playBuffers();
-    if (buffers.body != nullptr && buffers.decoded != nullptr && buffers.mutex != nullptr) {
-        return true;
-    }
-
-    if (buffers.body == nullptr) {
-        buffers.body = static_cast<char*>(heap_caps_malloc(kRequestBodyMax, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    }
-    if (buffers.decoded == nullptr) {
-        buffers.decoded = static_cast<uint8_t*>(heap_caps_malloc(kDecodedPcmMax, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    }
     if (buffers.mutex == nullptr) {
         buffers.mutex = xSemaphoreCreateMutex();
     }
-    return buffers.body != nullptr && buffers.decoded != nullptr && buffers.mutex != nullptr;
+    return buffers.mutex != nullptr;
+}
+
+bool ensurePcmBuffer() {
+    auto& buffers = playBuffers();
+    if (buffers.pcm == nullptr) {
+        buffers.pcm = static_cast<uint8_t*>(
+            heap_caps_malloc(kDecodedPcmMax, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    return buffers.pcm != nullptr;
+}
+
+bool ensureJsonBodyBuffer() {
+    auto& buffers = playBuffers();
+    if (buffers.jsonBody == nullptr) {
+        buffers.jsonBody = static_cast<char*>(
+            heap_caps_malloc(kJsonBodyMax, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    return buffers.jsonBody != nullptr;
 }
 
 bool lockPlayBuffers(TickType_t timeoutTicks) {
-    auto& buffers = playBuffers();
-    return ensurePlayBuffers() && xSemaphoreTake(buffers.mutex, timeoutTicks) == pdTRUE;
+    return ensureMutex() && xSemaphoreTake(playBuffers().mutex, timeoutTicks) == pdTRUE;
 }
 
 void unlockPlayBuffers() {
-    auto& buffers = playBuffers();
-    if (buffers.mutex != nullptr) {
-        xSemaphoreGive(buffers.mutex);
+    if (playBuffers().mutex != nullptr) {
+        xSemaphoreGive(playBuffers().mutex);
     }
 }
 
-bool readBody(httpd_req_t* req, char* buffer, size_t bufferLen, size_t& outLen) {
+bool readTextBody(httpd_req_t* req, char* buffer, size_t bufferLen, size_t& outLen) {
     outLen = 0;
     if (req == nullptr || buffer == nullptr || bufferLen == 0) {
         return false;
@@ -91,6 +97,29 @@ bool readBody(httpd_req_t* req, char* buffer, size_t bufferLen, size_t& outLen) 
         received += chunk;
     }
     buffer[received] = '\0';
+    outLen = static_cast<size_t>(received);
+    return true;
+}
+
+bool readBinaryBody(httpd_req_t* req, uint8_t* buffer, size_t bufferLen, size_t& outLen) {
+    outLen = 0;
+    if (req == nullptr || buffer == nullptr || bufferLen == 0) {
+        return false;
+    }
+
+    const int total = req->content_len;
+    if (total <= 0 || static_cast<size_t>(total) > bufferLen) {
+        return false;
+    }
+
+    int received = 0;
+    while (received < total) {
+        const int chunk = httpd_req_recv(req, reinterpret_cast<char*>(buffer + received), total - received);
+        if (chunk <= 0) {
+            return false;
+        }
+        received += chunk;
+    }
     outLen = static_cast<size_t>(received);
     return true;
 }
@@ -161,6 +190,160 @@ void copyJsonString(const cJSON* node, char* out, size_t outLen) {
     }
 }
 
+bool headerEquals(httpd_req_t* req, const char* name, const char* value) {
+    char buffer[32] = {};
+    if (httpd_req_get_hdr_value_str(req, name, buffer, sizeof(buffer)) != ESP_OK) {
+        return false;
+    }
+    return strcmp(buffer, value) == 0;
+}
+
+uint16_t headerUint16(httpd_req_t* req, const char* name, uint16_t defaultValue) {
+    char buffer[16] = {};
+    if (httpd_req_get_hdr_value_str(req, name, buffer, sizeof(buffer)) != ESP_OK) {
+        return defaultValue;
+    }
+    return static_cast<uint16_t>(atoi(buffer));
+}
+
+uint8_t headerUint8(httpd_req_t* req, const char* name, uint8_t defaultValue) {
+    char buffer[16] = {};
+    if (httpd_req_get_hdr_value_str(req, name, buffer, sizeof(buffer)) != ESP_OK) {
+        return defaultValue;
+    }
+    return static_cast<uint8_t>(atoi(buffer));
+}
+
+bool headerBool(httpd_req_t* req, const char* name) {
+    return headerEquals(req, name, "1") || headerEquals(req, name, "true");
+}
+
+bool copyHeader(httpd_req_t* req, const char* name, char* out, size_t outLen) {
+    if (out == nullptr || outLen == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (httpd_req_get_hdr_value_str(req, name, out, outLen) != ESP_OK) {
+        return false;
+    }
+    return out[0] != '\0';
+}
+
+bool enqueuePcm(
+    ApiContext* context,
+    int16_t* samples,
+    size_t sampleCount,
+    uint16_t sampleRateHz,
+    uint8_t channels,
+    bool streamEnd) {
+    if (context == nullptr || context->audioPlayback == nullptr) {
+        return false;
+    }
+    if (sampleCount == 0) {
+        if (streamEnd) {
+            context->audioPlayback->endStream();
+            return true;
+        }
+        return false;
+    }
+    return context->audioPlayback->enqueueDecodedPcm(
+        samples, sampleCount, sampleRateHz, channels, streamEnd);
+}
+
+esp_err_t handleBinaryPlay(httpd_req_t* req, ApiContext* context, const int64_t t0Us) {
+    char requestId[64] = {};
+    char commandId[64] = {};
+    copyHeader(req, "X-Request-Id", requestId, sizeof(requestId));
+    copyHeader(req, "X-Command-Id", commandId, sizeof(commandId));
+
+    if (!requireAuth(req, context, requestId)) {
+        return ESP_OK;
+    }
+
+    char targetUid[64] = {};
+    if (!copyHeader(req, "X-Target-Device-Uid", targetUid, sizeof(targetUid)) ||
+        context->deviceUid == nullptr || strcmp(targetUid, context->deviceUid) != 0) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INVALID_REQUEST", "target_device_uid mismatch", false, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 400, errBody);
+    }
+
+    if (context->audioPlayback == nullptr || !context->audioPlayback->isRunning()) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("UNAVAILABLE", "Playback service not running", false, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 503, errBody);
+    }
+
+    if (!ensurePcmBuffer()) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INTERNAL_ERROR", "Out of memory", false, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 500, errBody);
+    }
+
+    size_t bodyLen = 0;
+    if (!readBinaryBody(req, playBuffers().pcm, kDecodedPcmMax, bodyLen)) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INVALID_REQUEST", "Request body too large or unreadable", false, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 400, errBody);
+    }
+
+    const uint16_t sampleRateHz = headerUint16(req, "X-Sample-Rate", 16000);
+    const uint8_t channels = headerUint8(req, "X-Channels", 1);
+    const bool streamEnd = headerBool(req, "X-Stream-End");
+
+    if (bodyLen > 0 && (bodyLen < sizeof(int16_t) || (bodyLen % sizeof(int16_t)) != 0)) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INVALID_REQUEST", "Invalid PCM payload", false, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 400, errBody);
+    }
+    if (bodyLen == 0 && !streamEnd) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INVALID_REQUEST", "Empty PCM requires X-Stream-End", false, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 400, errBody);
+    }
+
+    if (!lockPlayBuffers(pdMS_TO_TICKS(100))) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("UNAVAILABLE", "Playback handler busy", true, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 503, errBody);
+    }
+
+    const size_t sampleCount = bodyLen / sizeof(int16_t);
+    const bool queued = enqueuePcm(
+        context,
+        reinterpret_cast<int16_t*>(playBuffers().pcm),
+        sampleCount,
+        sampleRateHz,
+        channels,
+        streamEnd);
+    const size_t ringUsed = context->audioPlayback->ringUsedBytes();
+    const size_t ringFree = context->audioPlayback->ringFreeBytes();
+    const size_t ringCapacity = context->audioPlayback->ringCapacityBytes();
+    unlockPlayBuffers();
+
+    if (!queued) {
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("UNAVAILABLE", "Playback queue full", true, requestId, errBody, sizeof(errBody));
+        return sendJsonResponse(req, 503, errBody);
+    }
+
+    const int64_t elapsedMs = (esp_timer_get_time() - t0Us) / 1000;
+    if (elapsedMs > 80) {
+        ESP_LOGW(kTag, "play chunk slow %lld ms (pcm=%u)", static_cast<long long>(elapsedMs),
+                 static_cast<unsigned>(bodyLen));
+    }
+
+    return sendOk(req, requestId, commandId, ringUsed, ringFree, ringCapacity);
+}
+
 }  // namespace
 
 bool PlayRoute::registerRoutes(httpd_handle_t server, const ApiContext* context) const {
@@ -180,6 +363,13 @@ bool PlayRoute::registerRoutes(httpd_handle_t server, const ApiContext* context)
 esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
     const int64_t t0Us = esp_timer_get_time();
     auto* context = static_cast<ApiContext*>(req->user_ctx);
+
+    char contentType[64] = {};
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", contentType, sizeof(contentType)) == ESP_OK &&
+        strstr(contentType, "application/octet-stream") != nullptr) {
+        return handleBinaryPlay(req, context, t0Us);
+    }
+
     if (!lockPlayBuffers(pdMS_TO_TICKS(100))) {
         ErrorResponseFactory errors;
         char errBody[256] = {};
@@ -187,12 +377,19 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
         return sendJsonResponse(req, 503, errBody);
     }
 
-    auto& buffers = playBuffers();
-    char* body = buffers.body;
-    uint8_t* decoded = buffers.decoded;
+    if (!ensureJsonBodyBuffer() || !ensurePcmBuffer()) {
+        unlockPlayBuffers();
+        ErrorResponseFactory errors;
+        char errBody[256] = {};
+        errors.build("INTERNAL_ERROR", "Out of memory", false, "", errBody, sizeof(errBody));
+        return sendJsonResponse(req, 500, errBody);
+    }
+
+    char* body = playBuffers().jsonBody;
+    uint8_t* decoded = playBuffers().pcm;
 
     size_t bodyLen = 0;
-    if (!readBody(req, body, kRequestBodyMax, bodyLen)) {
+    if (!readTextBody(req, body, kJsonBodyMax, bodyLen)) {
         unlockPlayBuffers();
         ErrorResponseFactory errors;
         char errBody[256] = {};
@@ -292,20 +489,14 @@ esp_err_t PlayRoute::handlePost(httpd_req_t* req) {
         return sendJsonResponse(req, 400, errBody);
     }
 
-    bool queued = true;
-    if (decodedLen > 0) {
-        const size_t sampleCount = decodedLen / sizeof(int16_t);
-        queued = context->audioPlayback->enqueueDecodedPcm(
-            reinterpret_cast<int16_t*>(decoded), sampleCount, sampleRateHz, channels, streamEnd);
-    } else if (streamEnd) {
-        context->audioPlayback->endStream();
-    } else {
-        ErrorResponseFactory errors;
-        char errBody[256] = {};
-        errors.build("INVALID_REQUEST", "Empty pcm_b64 requires stream_end", false, requestId, errBody, sizeof(errBody));
-        unlockPlayBuffers();
-        return sendJsonResponse(req, 400, errBody);
-    }
+    const size_t sampleCount = decodedLen / sizeof(int16_t);
+    const bool queued = enqueuePcm(
+        context,
+        reinterpret_cast<int16_t*>(decoded),
+        sampleCount,
+        sampleRateHz,
+        channels,
+        streamEnd);
     const size_t ringUsed = context->audioPlayback->ringUsedBytes();
     const size_t ringFree = context->audioPlayback->ringFreeBytes();
     const size_t ringCapacity = context->audioPlayback->ringCapacityBytes();

@@ -69,6 +69,7 @@ class _TtsJob:
     prompt_wav_path: str | None
     auth_token: str
     stream_end: bool = True
+    end_marker: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,7 @@ class ChatterboxTtsEngine:
         playback_fn: PlaybackFn | None = None,
         voice_wav_path: str | None = None,
         min_prompt_seconds: float = 5.0,
-        play_chunk_bytes: int = 12288,
+        play_chunk_bytes: int = 24576,
     ) -> None:
         if librosa is None or torch is None:
             raise RuntimeError("chatterbox-tts dependencies are not installed")
@@ -170,6 +171,31 @@ class ChatterboxTtsEngine:
                 prompt_wav_path=prompt_wav_path,
                 auth_token=auth_token,
                 stream_end=stream_end,
+            )
+        )
+
+    def speak_stream_end(
+        self,
+        utterance_id: str,
+        *,
+        device_uid: str,
+        device_ip: str,
+        auth_token: str = "",
+    ) -> None:
+        if not utterance_id or not device_uid or not device_ip:
+            return
+        if not self._started:
+            self.start()
+        self._job_queue.put(
+            _TtsJob(
+                utterance_id=utterance_id,
+                text="",
+                device_uid=device_uid,
+                device_ip=device_ip,
+                prompt_wav_path=None,
+                auth_token=auth_token,
+                stream_end=True,
+                end_marker=True,
             )
         )
 
@@ -299,6 +325,16 @@ class ChatterboxTtsEngine:
                 if job is None:
                     self._ready_queue.put(None)
                     return
+                if job.end_marker:
+                    self._ready_queue.put(
+                        _SynthResult(
+                            job=job,
+                            pcm=b"",
+                            sample_rate_hz=self._target_sample_rate_hz,
+                            channels=1,
+                        )
+                    )
+                    continue
                 try:
                     pcm, sample_rate_hz, channels = self.synthesize_pcm(
                         job.text,
@@ -342,6 +378,8 @@ class ChatterboxTtsEngine:
                     log_prefix="[tts]",
                 )
                 self._play_streams[job.utterance_id] = stream
+            else:
+                stream.update_target(job.device_ip, job.device_uid, job.auth_token)
             return stream
 
     def _close_play_stream(self, utterance_id: str) -> None:
@@ -356,12 +394,15 @@ class ChatterboxTtsEngine:
         sample_rate_hz = result.sample_rate_hz
         channels = result.channels
         duration_s = len(pcm) / (sample_rate_hz * channels * 2)
-        print(
-            f"[tts] {job.utterance_id}: {duration_s:.2f}s -> "
-            f"{job.device_uid} @ {job.device_ip}",
-            flush=True,
-        )
-        if self._playback_fn is None:
+        if job.end_marker:
+            print(f"[tts] {job.utterance_id}: stream end", flush=True)
+        else:
+            print(
+                f"[tts] {job.utterance_id}: {duration_s:.2f}s -> "
+                f"{job.device_uid} @ {job.device_ip}",
+                flush=True,
+            )
+        if self._playback_fn is None and not job.end_marker:
             print(f"[tts] {job.utterance_id}: playback disabled (no handler)", flush=True)
             return
 
@@ -371,6 +412,7 @@ class ChatterboxTtsEngine:
             self._close_play_stream(job.utterance_id)
         if not ok:
             print(f"[tts] {job.utterance_id}: playback failed", flush=True)
+            self._close_play_stream(job.utterance_id)
 
 
 def resolve_voice_wav_path(explicit: str | None) -> str | None:
@@ -398,5 +440,5 @@ def build_tts_from_args(args, *, playback_fn: PlaybackFn | None) -> ChatterboxTt
         target_sample_rate_hz=getattr(args, "tts_sample_rate_hz", 16000),
         playback_fn=playback_fn,
         voice_wav_path=voice_wav,
-        play_chunk_bytes=getattr(args, "play_chunk_bytes", 12288),
+        play_chunk_bytes=getattr(args, "play_chunk_bytes", 24576),
     )

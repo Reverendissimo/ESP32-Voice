@@ -22,11 +22,11 @@ constexpr size_t kUploadQueueDepth = 32;
 constexpr size_t kUploadBatchFrames = 4;
 constexpr size_t kUploadBatchBytes = kBytesPerFrame * kUploadBatchFrames;
 constexpr size_t kPlaybackQueueDepth = 64;
-// ~384 ms per chunk at 16 kHz; fits in ~20 KB JSON+b64 /play body.
-constexpr size_t kPlaybackChunkBytes = 12288;
+// ~768 ms mono @ 16 kHz per chunk — balances RTT headroom and PSRAM/Wi-Fi pressure.
+constexpr size_t kPlaybackChunkBytes = 24576;
 constexpr size_t kMaxPlaybackBytes = kPlaybackChunkBytes;
-// ~10 s mono @ 16 kHz — continuous playback ring (no gaps between /play chunks).
-constexpr size_t kPlaybackRingBytes = 320 * 1024;
+// ~6 s mono @ 16 kHz — enough cushion without starving Wi-Fi internal heap.
+constexpr size_t kPlaybackRingBytes = 192 * 1024;
 // ~2 s mono @ 16 kHz — absorb slow HTTP round-trips before opening speaker.
 constexpr size_t kPlaybackPrefetchBytes = 64 * 1024;
 // Codec vol 100 = 0 dB max; gain scales with UI volume slider.

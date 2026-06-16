@@ -23,8 +23,8 @@ bool HttpServerService::start(uint16_t port, const ApiContext* context) {
     config.server_port = port;
     config.max_uri_handlers = 40;
     config.lru_purge_enable = true;
-    // Default 4KB httpd stack overflows on config/health JSON and /play body parsing.
-    config.stack_size = 6144;
+    // /play parses JSON and receives up to 24 KiB binary PCM bodies.
+    config.stack_size = 8192;
     config.core_id = 0;
     config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     config.recv_wait_timeout = 15;

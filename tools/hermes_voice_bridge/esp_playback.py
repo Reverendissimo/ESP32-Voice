@@ -11,10 +11,13 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
-RING_CAPACITY_BYTES = 320 * 1024
-# ~384 ms of PCM per chunk at 16 kHz mono.
-SLOW_CHUNK_MS = 180
-DEFAULT_CHUNK_BYTES = 12288
+RING_CAPACITY_BYTES = 192 * 1024
+# ~768 ms of PCM per chunk at 16 kHz mono — must exceed typical LAN HTTP RTT.
+SLOW_CHUNK_MS = 400
+DEFAULT_CHUNK_BYTES = 24576
+HIGH_WATER_BYTES = 96 * 1024
+MIN_SEND_BYTES = 4096
+RING_WAIT_TIMEOUT_S = 5.0
 
 
 def _ring_stats(payload: dict) -> tuple[int, int, int]:
@@ -57,6 +60,7 @@ class EspPlayStream:
         self._log_prefix = log_prefix
         self._bytes_per_sec = max(1, sample_rate_hz * channels * 2)
         self._chunk_idx = 0
+        self._binary_play = True
         self._ring_used = 0
         self._ring_free = RING_CAPACITY_BYTES
         self._ring_capacity = RING_CAPACITY_BYTES
@@ -71,6 +75,61 @@ class EspPlayStream:
     def close(self) -> None:
         self._session.close()
 
+    def update_target(self, device_ip: str, device_uid: str, auth_token: str = "") -> None:
+        self._url = f"http://{device_ip}/api/v1/play"
+        self._device_uid = device_uid
+        self._auth_token = auth_token
+        if auth_token:
+            self._headers["X-Auth-Token"] = auth_token
+        else:
+            self._headers.pop("X-Auth-Token", None)
+
+    def _reset_ring_stats(self) -> None:
+        self._ring_used = 0
+        self._ring_free = self._ring_capacity
+
+    def _estimate_ring_drain(self, elapsed_s: float) -> None:
+        if elapsed_s <= 0:
+            return
+        drained = int(self._bytes_per_sec * elapsed_s)
+        if drained <= 0:
+            return
+        self._ring_used = max(0, self._ring_used - drained)
+        self._ring_free = min(self._ring_capacity, self._ring_free + drained)
+
+    def _wait_for_send_space(self, want_bytes: int) -> int:
+        """Wait until at least one even-sized slice fits; return sendable bytes (<= want)."""
+        want_bytes = max(2, want_bytes - (want_bytes % 2))
+        wait_start = time.monotonic()
+        last = wait_start
+        while True:
+            avail = self._ring_free - (self._ring_free % 2)
+            send_len = min(want_bytes, avail)
+            if send_len >= want_bytes:
+                return send_len
+            if send_len >= MIN_SEND_BYTES:
+                return send_len
+            if avail >= 2 and want_bytes <= MIN_SEND_BYTES:
+                return avail
+
+            now = time.monotonic()
+            self._estimate_ring_drain(now - last)
+            last = now
+
+            if now - wait_start > RING_WAIT_TIMEOUT_S:
+                if avail >= 2:
+                    return avail
+                print(
+                    f"{self._log_prefix} ring wait timeout "
+                    f"(free={self._ring_free}, want={want_bytes}) — retrying",
+                    flush=True,
+                )
+                self._estimate_ring_drain(0.2)
+                wait_start = now
+                last = now
+
+            time.sleep(0.01)
+
     def append_pcm(self, pcm: bytes, *, stream_end: bool) -> bool:
         if not pcm:
             if not stream_end:
@@ -82,45 +141,69 @@ class EspPlayStream:
         ok = True
 
         while sent < total:
-            piece = pcm[sent : sent + self._chunk_bytes]
-            needed = len(piece)
-            while self._ring_free < needed:
-                time.sleep(0.01)
-                self._ring_used = max(0, self._ring_used - int(self._bytes_per_sec * 0.01))
-                self._ring_free = self._ring_capacity - self._ring_used
+            want = min(self._chunk_bytes, total - sent)
 
-            is_last = sent + len(piece) >= total
-            end_stream = bool(stream_end and is_last)
-            if not self._post_chunk(piece, stream_end=end_stream):
+            if self._ring_used >= HIGH_WATER_BYTES:
+                time.sleep(want / self._bytes_per_sec * 0.35)
+
+            send_len = self._wait_for_send_space(want)
+            if send_len < 2:
                 ok = False
                 break
 
-            sent += len(piece)
-            self._chunk_idx += 1
+            piece = pcm[sent : sent + send_len]
+            is_last = sent + send_len >= total
+            end_stream = bool(stream_end and is_last)
+            if not self._post_chunk(piece, stream_end=end_stream):
+                ok = False
+                self._reset_ring_stats()
+                break
+
+            sent += send_len
 
         return ok
 
     def _post_chunk(self, piece: bytes, *, stream_end: bool) -> bool:
-        body: dict[str, Any] = {
-            "v": 1,
-            "target_device_uid": self._device_uid,
-            "request_id": f"{self._log_prefix.strip('[]')}_{self._chunk_idx}",
-            "command_id": f"chunk_{self._chunk_idx}",
-            "sample_rate_hz": self._sample_rate_hz,
-            "channels": self._channels,
-            "pcm_b64": base64.b64encode(piece).decode("ascii"),
-            "stream_end": stream_end,
-        }
+        headers = dict(self._headers)
+        headers["X-Target-Device-Uid"] = self._device_uid
+        headers["X-Request-Id"] = f"{self._log_prefix.strip('[]')}_{self._chunk_idx}"
+        headers["X-Command-Id"] = f"chunk_{self._chunk_idx}"
+        headers["X-Sample-Rate"] = str(self._sample_rate_hz)
+        headers["X-Channels"] = str(self._channels)
+        headers["X-Stream-End"] = "1" if stream_end else "0"
+
+        if piece and self._binary_play:
+            headers["Content-Type"] = "application/octet-stream"
+            body: bytes | dict[str, Any] = piece
+        else:
+            body = {
+                "v": 1,
+                "target_device_uid": self._device_uid,
+                "request_id": headers["X-Request-Id"],
+                "command_id": headers["X-Command-Id"],
+                "sample_rate_hz": self._sample_rate_hz,
+                "channels": self._channels,
+                "pcm_b64": base64.b64encode(piece).decode("ascii") if piece else "",
+                "stream_end": stream_end,
+            }
 
         for attempt in range(self._max_retries):
             t0 = time.monotonic()
             try:
-                resp = self._session.post(
-                    self._url,
-                    json=body,
-                    headers=self._headers,
-                    timeout=self._request_timeout_s,
-                )
+                if isinstance(body, bytes):
+                    resp = self._session.post(
+                        self._url,
+                        data=body,
+                        headers=headers,
+                        timeout=self._request_timeout_s,
+                    )
+                else:
+                    resp = self._session.post(
+                        self._url,
+                        json=body,
+                        headers=headers,
+                        timeout=self._request_timeout_s,
+                    )
             except requests.RequestException as exc:
                 wait = min(self._retry_sleep_s * (attempt + 1), 1.0)
                 print(
@@ -156,7 +239,16 @@ class EspPlayStream:
                         f"({elapsed_ms:.0f} ms > {SLOW_CHUNK_MS} ms) — playback may stutter",
                         flush=True,
                     )
+                self._chunk_idx += 1
                 return True
+
+            if resp.status_code == 400 and isinstance(body, bytes) and self._binary_play:
+                self._binary_play = False
+                print(
+                    f"{self._log_prefix} binary /play not supported — falling back to JSON",
+                    flush=True,
+                )
+                return self._post_chunk(piece, stream_end=stream_end)
 
             if resp.status_code == 503:
                 self._ring_free = 0
@@ -175,6 +267,7 @@ class EspPlayStream:
             f"{self._log_prefix} chunk {self._chunk_idx}: playback stalled after retries",
             flush=True,
         )
+        self._reset_ring_stats()
         return False
 
 
