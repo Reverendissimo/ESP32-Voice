@@ -49,6 +49,9 @@ sdkconfig.ci
 # Local flash bundles (copy to host manually)
 dist/
 
+# Local planning notes (not for GitHub)
+local/
+
 # Local secrets (never commit)
 tools/hermes_voice_bridge/.env.local
 tools/hermes_voice_bridge/.env
