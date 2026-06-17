@@ -11,10 +11,12 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
+from bridge_log import blog
+
 RING_CAPACITY_BYTES = 192 * 1024
-# ~768 ms of PCM per chunk at 16 kHz mono — must exceed typical LAN HTTP RTT.
+# ~256 ms of PCM per chunk at 16 kHz mono — smaller posts reduce time-to-first-sample on ESP.
 SLOW_CHUNK_MS = 400
-DEFAULT_CHUNK_BYTES = 24576
+DEFAULT_CHUNK_BYTES = 8192
 HIGH_WATER_BYTES = 96 * 1024
 MIN_SEND_BYTES = 4096
 RING_WAIT_TIMEOUT_S = 5.0
@@ -119,10 +121,9 @@ class EspPlayStream:
             if now - wait_start > RING_WAIT_TIMEOUT_S:
                 if avail >= 2:
                     return avail
-                print(
+                blog(
                     f"{self._log_prefix} ring wait timeout "
                     f"(free={self._ring_free}, want={want_bytes}) — retrying",
-                    flush=True,
                 )
                 self._estimate_ring_drain(0.2)
                 wait_start = now
@@ -206,10 +207,9 @@ class EspPlayStream:
                     )
             except requests.RequestException as exc:
                 wait = min(self._retry_sleep_s * (attempt + 1), 1.0)
-                print(
+                blog(
                     f"{self._log_prefix} chunk {self._chunk_idx} error: {exc} "
                     f"(retry in {wait:.1f}s)",
-                    flush=True,
                 )
                 time.sleep(wait)
                 continue
@@ -232,21 +232,19 @@ class EspPlayStream:
                 if keep_alive:
                     msg += f", conn={keep_alive}"
                 msg += ")"
-                print(msg, flush=True)
+                blog(msg)
                 if elapsed_ms > SLOW_CHUNK_MS:
-                    print(
+                    blog(
                         f"{self._log_prefix} WARN chunk {self._chunk_idx} slow "
                         f"({elapsed_ms:.0f} ms > {SLOW_CHUNK_MS} ms) — playback may stutter",
-                        flush=True,
                     )
                 self._chunk_idx += 1
                 return True
 
             if resp.status_code == 400 and isinstance(body, bytes) and self._binary_play:
                 self._binary_play = False
-                print(
+                blog(
                     f"{self._log_prefix} binary /play not supported — falling back to JSON",
-                    flush=True,
                 )
                 return self._post_chunk(piece, stream_end=stream_end)
 
@@ -256,16 +254,14 @@ class EspPlayStream:
                 time.sleep(min(self._retry_sleep_s * (attempt + 1), 1.0))
                 continue
 
-            print(
+            blog(
                 f"{self._log_prefix} chunk {self._chunk_idx} HTTP {resp.status_code} "
                 f"({len(piece)} bytes, {elapsed_ms:.0f} ms)",
-                flush=True,
             )
             return False
 
-        print(
+        blog(
             f"{self._log_prefix} chunk {self._chunk_idx}: playback stalled after retries",
-            flush=True,
         )
         self._reset_ring_stats()
         return False
@@ -289,7 +285,7 @@ def stream_pcm_to_esp(
 ) -> bool:
     """Stream PCM using device ring-buffer feedback for flow control."""
     if requests is None:
-        print(f"{log_prefix} requests not installed; skip playback", flush=True)
+        blog(f"{log_prefix} requests not installed; skip playback")
         return False
 
     end_stream = True if stream_end is None else stream_end

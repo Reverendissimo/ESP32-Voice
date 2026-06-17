@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from esp_playback import EspPlayStream
+from bridge_log import blog
 from ml_runtime import configure_chatterbox_attention, configure_ml_runtime, quiet_hf_hub_noise
 
 configure_ml_runtime()
@@ -91,7 +92,9 @@ class ChatterboxTtsEngine:
         playback_fn: PlaybackFn | None = None,
         voice_wav_path: str | None = None,
         min_prompt_seconds: float = 5.0,
-        play_chunk_bytes: int = 24576,
+        play_chunk_bytes: int = 8192,
+        play_lead_ms: int = 1000,
+        attn_mode: str = "sdpa",
     ) -> None:
         if librosa is None or torch is None:
             raise RuntimeError("chatterbox-tts dependencies are not installed")
@@ -101,7 +104,14 @@ class ChatterboxTtsEngine:
         self._target_sample_rate_hz = target_sample_rate_hz
         self._playback_fn = playback_fn
         self._play_chunk_bytes = max(2, play_chunk_bytes - (play_chunk_bytes % 2))
+        self._play_lead_ms = max(0, play_lead_ms)
+        bytes_per_sec = max(1, target_sample_rate_hz * 2)
+        self._play_lead_bytes = int(bytes_per_sec * self._play_lead_ms / 1000)
+        self._pcm_buffers: dict[str, bytearray] = {}
+        self._pcm_buffer_lock = threading.Lock()
+        self._lead_primed: set[str] = set()
         self._min_prompt_seconds = min_prompt_seconds
+        self._attn_mode = attn_mode
         self._play_streams: dict[str, EspPlayStream] = {}
         self._play_streams_lock = threading.Lock()
         self._voice_wav_path = self._validate_voice_wav(voice_wav_path)
@@ -210,17 +220,16 @@ class ChatterboxTtsEngine:
             return None
         path = Path(voice_wav_path)
         if not path.is_file():
-            print(f"[tts] voice wav not found: {path} (using default voice)", flush=True)
+            blog(f"[tts] voice wav not found: {path} (using default voice)")
             return None
         validated = self._prompt_long_enough(str(path))
         if validated is None:
-            print(
+            blog(
                 f"[tts] voice wav too short for {self._model_name} "
                 f"(need >= {self._min_prompt_seconds:.0f}s): {path} (using default voice)",
-                flush=True,
             )
             return None
-        print(f"[tts] voice clone -> {path}", flush=True)
+        blog(f"[tts] voice clone -> {path}")
         return validated
 
     def _ensure_model(self) -> object:
@@ -228,10 +237,9 @@ class ChatterboxTtsEngine:
             if self._model is not None:
                 return self._model
 
-            print(
+            blog(
                 f"[tts] loading chatterbox model={self._model_name} device={self._device} "
                 f"voice={self.voice_label}",
-                flush=True,
             )
             t0 = time.time()
             with quiet_hf_hub_noise():
@@ -248,9 +256,9 @@ class ChatterboxTtsEngine:
 
                     self._model = ChatterboxTTS.from_pretrained(device=self._device)
 
-            configure_chatterbox_attention(self._model)
+            configure_chatterbox_attention(self._model, mode=self._attn_mode)
 
-            print(f"[tts] model ready in {time.time() - t0:.1f}s", flush=True)
+            blog(f"[tts] model ready in {time.time() - t0:.1f}s")
             return self._model
 
     def _prompt_long_enough(self, prompt_wav_path: str | None) -> str | None:
@@ -294,7 +302,7 @@ class ChatterboxTtsEngine:
             wav = model.generate(text)
 
         src_sr = int(getattr(model, "sr", self._target_sample_rate_hz))
-        print(f"[tts] synthesized {len(text)} chars in {time.time() - t0:.1f}s", flush=True)
+        blog(f"[tts] synthesized {len(text)} chars in {time.time() - t0:.1f}s")
         return wav, src_sr
 
     def _wav_to_pcm16(self, wav: object, src_sr: int) -> tuple[bytes, int, int]:
@@ -346,7 +354,7 @@ class ChatterboxTtsEngine:
                         )
                     )
                 except Exception:
-                    print(f"[tts] {job.utterance_id}: synthesis failed", flush=True)
+                    blog(f"[tts] {job.utterance_id}: synthesis failed")
                     traceback.print_exc()
             finally:
                 self._job_queue.task_done()
@@ -379,11 +387,73 @@ class ChatterboxTtsEngine:
                 stream.update_target(job.device_ip, job.device_uid, job.auth_token)
             return stream
 
+    def _clear_utterance_buffer(self, utterance_id: str) -> None:
+        with self._pcm_buffer_lock:
+            self._pcm_buffers.pop(utterance_id, None)
+            self._lead_primed.discard(utterance_id)
+
+    def _flush_buffered_pcm(
+        self,
+        job: _TtsJob,
+        *,
+        force: bool = False,
+        stream_end: bool | None = None,
+    ) -> bool:
+        utterance_id = job.utterance_id
+        bytes_per_sec = max(1, self._target_sample_rate_hz * 2)
+        end = job.stream_end if stream_end is None else stream_end
+
+        with self._pcm_buffer_lock:
+            buf = self._pcm_buffers.get(utterance_id, bytearray())
+            buf_len = len(buf)
+            already_streaming = utterance_id in self._lead_primed
+            ready = (
+                force
+                or end
+                or already_streaming
+                or self._play_lead_bytes <= 0
+                or buf_len >= self._play_lead_bytes
+            )
+
+        if not ready:
+            blog(
+                f"[tts] {utterance_id}: lead buffer "
+                f"{buf_len * 1000 / bytes_per_sec:.0f}/{self._play_lead_ms} ms",
+            )
+            return True
+
+        if buf_len == 0:
+            if end and self._playback_fn is not None:
+                stream = self._play_stream_for(job)
+                return stream.append_pcm(b"", stream_end=True)
+            return True
+
+        with self._pcm_buffer_lock:
+            pcm = bytes(self._pcm_buffers.pop(utterance_id, bytearray()))
+
+        if utterance_id not in self._lead_primed and self._play_lead_ms > 0:
+            blog(
+                f"[tts] {utterance_id}: lead buffer primed "
+                f"({len(pcm) * 1000 / bytes_per_sec:.0f} ms audio)",
+            )
+            self._lead_primed.add(utterance_id)
+
+        if self._playback_fn is None:
+            return True
+
+        stream = self._play_stream_for(job)
+        ok = stream.append_pcm(pcm, stream_end=end)
+        if not ok:
+            blog(f"[tts] {utterance_id}: playback failed")
+            self._close_play_stream(utterance_id)
+        return ok
+
     def _close_play_stream(self, utterance_id: str) -> None:
         with self._play_streams_lock:
             stream = self._play_streams.pop(utterance_id, None)
         if stream is not None:
             stream.close()
+        self._clear_utterance_buffer(utterance_id)
 
     def _play_result(self, result: _SynthResult) -> None:
         job = result.job
@@ -392,23 +462,30 @@ class ChatterboxTtsEngine:
         channels = result.channels
         duration_s = len(pcm) / (sample_rate_hz * channels * 2)
         if job.end_marker:
-            print(f"[tts] {job.utterance_id}: stream end", flush=True)
-        else:
-            print(
-                f"[tts] {job.utterance_id}: {duration_s:.2f}s -> "
-                f"{job.device_uid} @ {job.device_ip}",
-                flush=True,
-            )
-        if self._playback_fn is None and not job.end_marker:
-            print(f"[tts] {job.utterance_id}: playback disabled (no handler)", flush=True)
+            blog(f"[tts] {job.utterance_id}: stream end")
+            if self._playback_fn is not None:
+                self._flush_buffered_pcm(job, force=True, stream_end=True)
+            self._close_play_stream(job.utterance_id)
             return
 
-        stream = self._play_stream_for(job)
-        ok = stream.append_pcm(pcm, stream_end=job.stream_end)
+        if not pcm:
+            return
+
+        blog(
+            f"[tts] {job.utterance_id}: {duration_s:.2f}s -> "
+            f"{job.device_uid} @ {job.device_ip}",
+        )
+        if self._playback_fn is None:
+            blog(f"[tts] {job.utterance_id}: playback disabled (no handler)")
+            return
+
+        with self._pcm_buffer_lock:
+            self._pcm_buffers.setdefault(job.utterance_id, bytearray()).extend(pcm)
+
+        ok = self._flush_buffered_pcm(job, force=job.stream_end)
         if job.stream_end:
             self._close_play_stream(job.utterance_id)
-        if not ok:
-            print(f"[tts] {job.utterance_id}: playback failed", flush=True)
+        elif not ok:
             self._close_play_stream(job.utterance_id)
 
 
@@ -435,5 +512,7 @@ def build_tts_from_args(args, *, playback_fn: PlaybackFn | None) -> ChatterboxTt
         target_sample_rate_hz=getattr(args, "tts_sample_rate_hz", 16000),
         playback_fn=playback_fn,
         voice_wav_path=voice_wav,
-        play_chunk_bytes=getattr(args, "play_chunk_bytes", 24576),
+        play_chunk_bytes=getattr(args, "play_chunk_bytes", 8192),
+        play_lead_ms=getattr(args, "tts_play_lead_ms", 1000),
+        attn_mode=getattr(args, "tts_attn", "sdpa"),
     )

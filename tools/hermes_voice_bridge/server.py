@@ -50,6 +50,7 @@ try:
 except ImportError:
     requests = None  # type: ignore
 
+from bridge_log import blog, configure_bridge_log
 from bridge_settings import BridgeSettingsStore, settings_defaults_from_env
 from bridge_ui import BridgeUiHandlers, _UI_POST_PATHS
 from device_registry import DeviceRegistry
@@ -246,10 +247,9 @@ class SpeechStore:
             self._history.insert(0, record)
             self._history = self._history[:20]
 
-        print(
+        blog(
             f"[speech] {utt.device_uid} {utterance_id} ({utt.protocol}): "
             f"{chunks_received} segments, {len(pcm)} bytes -> {wav_path}",
-            flush=True,
         )
         return {"ok": True, **record}
 
@@ -311,6 +311,58 @@ def _split_pending_sentences(pending: str) -> tuple[list[str], str]:
     return sentences, rest
 
 
+_MIN_TTS_CLAUSE_CHARS = 24
+_MIN_TTS_FIRST_CLAUSE_CHARS = 12
+_MAX_TTS_PENDING_CHARS = 100
+_FIRST_CHUNK_WORD_CHARS = 40
+
+
+def _split_pending_speech_chunks(
+    pending: str,
+    *,
+    min_clause_chars: int = _MIN_TTS_CLAUSE_CHARS,
+    first_clause_chars: int = _MIN_TTS_FIRST_CLAUSE_CHARS,
+    max_pending_chars: int = _MAX_TTS_PENDING_CHARS,
+    aggressive_first: bool = False,
+    idle_flush: bool = False,
+) -> tuple[list[str], str]:
+    """Extract speakable units: sentences, comma clauses, word buffers, or idle tail."""
+    if idle_flush:
+        text = pending.strip()
+        if len(text) >= 3:
+            return [text], ""
+        return [], pending
+
+    chunks, rest = _split_pending_sentences(pending)
+    clause_min = first_clause_chars if aggressive_first else min_clause_chars
+
+    while True:
+        match = re.search(r",\s+", rest)
+        if not match:
+            break
+        clause = rest[: match.start()].strip()
+        if len(clause) < clause_min:
+            break
+        chunks.append(clause)
+        rest = rest[match.end() :]
+
+    word_cut = _FIRST_CHUNK_WORD_CHARS if aggressive_first else max_pending_chars
+    if len(rest) >= word_cut:
+        cut = rest[:word_cut]
+        last_space = cut.rfind(" ")
+        if last_space >= clause_min:
+            chunks.append(rest[:last_space].strip())
+            rest = rest[last_space + 1 :]
+    elif len(rest) >= max_pending_chars:
+        cut = rest[:max_pending_chars]
+        last_space = cut.rfind(" ")
+        if last_space >= min_clause_chars:
+            chunks.append(rest[:last_space].strip())
+            rest = rest[last_space + 1 :]
+
+    return chunks, rest
+
+
 def hermes_failure_reply(kind: str) -> str:
     if kind == "timeout":
         return "Sorry, the assistant is taking too long. Please try again."
@@ -336,26 +388,80 @@ def handle_voice_reply(
 ) -> None:
     reply = user_text
     if cfg.hermes is not None:
-        pending = ""
-        tts_started = False
+        stream_lock = threading.Lock()
+        stream_stop = threading.Event()
+        stream_state = {
+            "pending": "",
+            "tts_started": False,
+            "first_chunk": True,
+            "last_delta": 0.0,
+        }
+
+        def speak_chunks(chunks: list[str], *, idle: bool = False) -> None:
+            if not chunks or cfg.tts is None:
+                return
+            auth = device_auth_token(cfg, device_uid)
+            for chunk in chunks:
+                tag = "hermes+ idle" if idle else "hermes+"
+                blog(f"[{tag}] {utterance_id}: {chunk}")
+                stream_state["tts_started"] = True
+                cfg.tts.speak_async(
+                    utterance_id,
+                    chunk,
+                    device_uid=device_uid,
+                    device_ip=device_ip,
+                    auth_token=auth,
+                    stream_end=False,
+                )
+
+        def drain_pending(*, idle: bool = False) -> None:
+            with stream_lock:
+                pending = stream_state["pending"]
+                if not pending.strip():
+                    return
+                if idle:
+                    chunks, rest = _split_pending_speech_chunks(pending, idle_flush=True)
+                else:
+                    chunks, rest = _split_pending_speech_chunks(
+                        pending,
+                        min_clause_chars=cfg.tts_min_clause_chars,
+                        first_clause_chars=cfg.tts_first_clause_chars,
+                        aggressive_first=stream_state["first_chunk"],
+                    )
+                stream_state["pending"] = rest
+                if chunks:
+                    stream_state["first_chunk"] = False
+            speak_chunks(chunks, idle=idle)
 
         def on_delta(delta: str) -> None:
-            nonlocal pending, tts_started
-            pending += delta
-            sentences, pending = _split_pending_sentences(pending)
-            for sentence in sentences:
-                print(f"[hermes+] {utterance_id}: {sentence}", flush=True)
-                if cfg.tts is not None:
-                    tts_started = True
-                    cfg.tts.speak_async(
-                        utterance_id,
-                        sentence,
-                        device_uid=device_uid,
-                        device_ip=device_ip,
-                        auth_token=device_auth_token(cfg, device_uid),
-                        stream_end=False,
-                    )
+            with stream_lock:
+                stream_state["pending"] += delta
+                stream_state["last_delta"] = time.monotonic()
+            drain_pending()
 
+        def idle_watch() -> None:
+            poll_s = max(0.02, cfg.tts_idle_poll_ms / 1000.0)
+            flush_s = cfg.tts_idle_flush_ms / 1000.0
+            while not stream_stop.wait(poll_s):
+                if flush_s <= 0:
+                    continue
+                with stream_lock:
+                    pending_ok = bool(stream_state["pending"].strip())
+                    last_delta = stream_state["last_delta"]
+                if not pending_ok or last_delta <= 0:
+                    continue
+                if time.monotonic() - last_delta < flush_s:
+                    continue
+                drain_pending(idle=True)
+                with stream_lock:
+                    stream_state["last_delta"] = time.monotonic()
+
+        watcher = threading.Thread(
+            target=idle_watch,
+            name=f"tts-idle-{utterance_id}",
+            daemon=True,
+        )
+        watcher.start()
         try:
             reply = cfg.hermes.chat(
                 user_text,
@@ -363,21 +469,23 @@ def handle_voice_reply(
                 on_delta=on_delta,
             )
             if reply:
-                print(f"[hermes] {utterance_id}: {reply}", flush=True)
+                blog(f"[hermes] {utterance_id}: {reply}")
             else:
-                print(f"[hermes] {utterance_id}: (empty reply)", flush=True)
+                blog(f"[hermes] {utterance_id}: (empty reply)")
                 reply = user_text
         except HermesError as exc:
-            print(f"[hermes] {utterance_id}: {exc.kind}: {exc}", flush=True)
+            blog(f"[hermes] {utterance_id}: {exc.kind}: {exc}")
             reply = hermes_failure_reply(exc.kind)
         except Exception as exc:
-            print(f"[hermes] {utterance_id}: unexpected error: {exc}", flush=True)
+            blog(f"[hermes] {utterance_id}: unexpected error: {exc}")
             traceback.print_exc()
             reply = hermes_failure_reply("unknown")
         else:
-            remainder = pending.strip()
+            with stream_lock:
+                remainder = stream_state["pending"].strip()
+                stream_state["pending"] = ""
+                tts_started = stream_state["tts_started"]
             if remainder and cfg.tts is not None:
-                tts_started = True
                 cfg.tts.speak_async(
                     utterance_id,
                     remainder,
@@ -394,6 +502,9 @@ def handle_voice_reply(
                     auth_token=device_auth_token(cfg, device_uid),
                 )
             return
+        finally:
+            stream_stop.set()
+            watcher.join(timeout=1.0)
 
     if cfg.tts is None or not reply:
         return
@@ -416,7 +527,11 @@ class ServerConfig:
     echo_enabled: bool = False
     echo_device_ip: str = ""
     echo_auth_token: str = ""
-    play_chunk_bytes: int = 24576
+    play_chunk_bytes: int = 8192
+    tts_idle_flush_ms: int = 500
+    tts_idle_poll_ms: int = 50
+    tts_first_clause_chars: int = _MIN_TTS_FIRST_CLAUSE_CHARS
+    tts_min_clause_chars: int = _MIN_TTS_CLAUSE_CHARS
     transcriber: WhisperTranscriber | None = None
     tts: ChatterboxTtsEngine | None = None
     hermes: HermesClient | None = None
@@ -439,7 +554,9 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.cfg  # type: ignore[attr-defined]
 
     def log_message(self, format: str, *args: Any) -> None:
-        sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
+        from bridge_log import blog_http
+
+        blog_http(self.address_string(), format % args)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -707,10 +824,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         duration_s = pcm_len / (sample_rate_hz * channels * 2) if pcm_len else 0.0
-        print(
+        blog(
             f"[stream] {device_uid or 'unknown'} {utterance_id}: "
             f"{pcm_len} bytes ({sample_rate_hz} Hz, {channels} ch, ~{duration_s:.2f}s)",
-            flush=True,
         )
         self._send_json(
             200,
@@ -790,6 +906,7 @@ class Handler(BaseHTTPRequestHandler):
                     "device_uid": device_uid,
                     "device_ip": device_ip,
                     "session_id": str(result.get("session_id", "")),
+                    "finalize_ts": time.time(),
                 }
 
             # ESP finalize waits only ~5s; reply before echo/ASR work.
@@ -811,7 +928,7 @@ class Handler(BaseHTTPRequestHandler):
                         )
 
                 if self.cfg.transcriber is not None and utterance_id:
-                    if getattr(self.server, "no_streaming_asr", False):
+                    if not getattr(self.server, "streaming_asr", False):
                         with wave.open(str(result["wav_path"]), "rb") as wf:
                             pcm = wf.readframes(wf.getnframes())
                         self.cfg.transcriber.load_pcm_and_finalize(
@@ -904,8 +1021,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--play-chunk-bytes",
         type=int,
-        default=24576,
-        help="PCM bytes per /play POST (default: 24576, ~768 ms @ 16 kHz)",
+        default=8192,
+        help="PCM bytes per /play POST (default: 8192, ~256 ms @ 16 kHz)",
+    )
+    parser.add_argument(
+        "--tts-idle-flush-ms",
+        type=int,
+        default=500,
+        help="Flush pending Hermes text to TTS after N ms without new tokens (default: 500, 0=off)",
+    )
+    parser.add_argument(
+        "--tts-idle-poll-ms",
+        type=int,
+        default=50,
+        help="Poll interval for Hermes idle flush watchdog (default: 50)",
+    )
+    parser.add_argument(
+        "--tts-first-clause-chars",
+        type=int,
+        default=_MIN_TTS_FIRST_CLAUSE_CHARS,
+        help="Min chars for first streamed TTS clause (default: 12)",
+    )
+    parser.add_argument(
+        "--tts-play-lead-ms",
+        type=int,
+        default=1000,
+        help="Buffer synthesized PCM before first ESP send (default: 1000, 0=off)",
     )
     parser.add_argument(
         "--no-hermes-stream",
@@ -951,10 +1092,17 @@ def parse_args() -> argparse.Namespace:
         help="Run partial ASR every N ms of new audio during upload (default: 1200)",
     )
     parser.add_argument(
-        "--no-streaming-asr",
+        "--streaming-asr",
         action="store_true",
-        help="Only transcribe on finalize (no incremental [asr+] during upload)",
+        help="Run partial ASR during upload ([asr+] logs); default is finalize-only",
     )
+    parser.add_argument(
+        "--no-streaming-asr",
+        action="store_false",
+        dest="streaming_asr",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(streaming_asr=False)
     parser.add_argument(
         "--no-tts",
         action="store_true",
@@ -982,6 +1130,12 @@ def parse_args() -> argparse.Namespace:
         "--tts-voice-wav",
         default="",
         help="Override Chatterbox voice clone WAV (default: voices/default_female.wav)",
+    )
+    parser.add_argument(
+        "--tts-attn",
+        default="sdpa",
+        choices=("sdpa", "eager"),
+        help="Chatterbox attention backend (default: sdpa; use eager if generate() fails)",
     )
     parser.add_argument(
         "--tts-builtin-voice",
@@ -1070,6 +1224,15 @@ def parse_args() -> argparse.Namespace:
         help=f"Path to active Hermes session file (default: {DEFAULT_SESSION_FILE})",
     )
     parser.add_argument(
+        "--debug",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="FILE",
+        help="Pipeline log with unix-ms timestamps to stdout and FILE "
+        "(default: <repo>/local/bridge-debug.log)",
+    )
+    parser.add_argument(
         "--firmware-bin",
         default="",
         help="Path to esp32-voice.bin for OTA hosting (default: dist or firmware/build)",
@@ -1099,8 +1262,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    configure_ml_runtime(hf_token=args.hf_token)
     here = Path(__file__).resolve().parent
+    if args.debug is not None:
+        default_log = here.parent.parent / "local" / "bridge-debug.log"
+        debug_path = args.debug.strip() or str(default_log)
+        configure_bridge_log(debug_path)
+    configure_ml_runtime(hf_token=args.hf_token)
     recordings = Path(args.recordings_dir) if args.recordings_dir else here / "recordings"
 
     cfg = ServerConfig()
@@ -1110,6 +1277,10 @@ def main() -> int:
     cfg.echo_device_ip = args.echo_device_ip
     cfg.echo_auth_token = args.echo_auth_token
     cfg.play_chunk_bytes = max(2, args.play_chunk_bytes - (args.play_chunk_bytes % 2))
+    cfg.tts_idle_flush_ms = max(0, args.tts_idle_flush_ms)
+    cfg.tts_idle_poll_ms = max(20, args.tts_idle_poll_ms)
+    cfg.tts_first_clause_chars = max(3, args.tts_first_clause_chars)
+    cfg.tts_min_clause_chars = _MIN_TTS_CLAUSE_CHARS
     cfg.reply_ctx = {}
     cfg.firmware_bin_path = args.firmware_bin.strip()
     cfg.firmware_version_override = args.firmware_version.strip()
@@ -1162,7 +1333,7 @@ def main() -> int:
                 session_id=args.session,
             )
         except ValueError as exc:
-            print(f"Hermes session error: {exc}", flush=True)
+            blog(f"Hermes session error: {exc}")
             return 2
         if hermes_session_mode in {"restored", "continued"}:
             cfg.hermes.mark_conversation_introduced(cfg.hermes_conversation_id)
@@ -1172,7 +1343,14 @@ def main() -> int:
         if ctx is None:
             return
 
+        finalize_ts = ctx.get("finalize_ts")
+        if isinstance(finalize_ts, (int, float)):
+            blog(
+                f"[latency] {utterance_id}: finalize -> asr_final {time.time() - finalize_ts:.2f}s",
+            )
+
         def run() -> None:
+            t0 = time.time()
             handle_voice_reply(
                 cfg,
                 utterance_id,
@@ -1180,6 +1358,9 @@ def main() -> int:
                 device_uid=ctx["device_uid"],
                 device_ip=ctx["device_ip"],
                 session_id=ctx.get("session_id", ""),
+            )
+            blog(
+                f"[latency] {utterance_id}: reply pipeline {time.time() - t0:.2f}s",
             )
 
         threading.Thread(target=run, name=f"reply-{utterance_id}", daemon=True).start()
@@ -1236,74 +1417,72 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.cfg = cfg  # type: ignore[attr-defined]
     server.ui_handlers = ui_handlers  # type: ignore[attr-defined]
-    server.no_streaming_asr = args.no_streaming_asr  # type: ignore[attr-defined]
+    server.streaming_asr = args.streaming_asr  # type: ignore[attr-defined]
 
-    print("Hermes-Voice-Bridge", flush=True)
-    print(f"Admin UI -> http://{args.host}:{args.port}{cfg.prefix}/ui", flush=True)
-    print(f"Listening on http://{args.host}:{args.port}{cfg.prefix}", flush=True)
-    print("Protocol A3 (primary):", flush=True)
-    print(f"  POST {cfg.prefix}/speech/stream  (binary PCM, chunked HTTP body + X-* headers)", flush=True)
-    print(f"  POST {cfg.prefix}/speech/finalize  (JSON metadata after stream closes)", flush=True)
-    print(f"  POST {cfg.prefix}/tts/speak  (JSON text -> Chatterbox -> ESP /play)", flush=True)
-    print("Legacy A2:", flush=True)
-    print(f"  POST {cfg.prefix}/speech  (JSON + pcm_b64 per chunk)", flush=True)
-    print(f"  GET  {cfg.prefix}/status", flush=True)
-    print(f"Recordings -> {recordings}", flush=True)
+    blog("Hermes-Voice-Bridge")
+    blog(f"Admin UI -> http://{args.host}:{args.port}{cfg.prefix}/ui")
+    blog(f"Listening on http://{args.host}:{args.port}{cfg.prefix}")
+    blog("Protocol A3 (primary):")
+    blog(f"  POST {cfg.prefix}/speech/stream  (binary PCM, chunked HTTP body + X-* headers)")
+    blog(f"  POST {cfg.prefix}/speech/finalize  (JSON metadata after stream closes)")
+    blog(f"  POST {cfg.prefix}/tts/speak  (JSON text -> Chatterbox -> ESP /play)")
+    blog("Legacy A2:")
+    blog(f"  POST {cfg.prefix}/speech  (JSON + pcm_b64 per chunk)")
+    blog(f"  GET  {cfg.prefix}/status")
+    blog(f"Recordings -> {recordings}")
     if args.echo_on:
         target = args.echo_device_ip or "<upload client IP>"
-        print(f"Echo playback -> http://{target}/api/v1/play", flush=True)
+        blog(f"Echo playback -> http://{target}/api/v1/play")
     else:
-        print("Echo -> disabled", flush=True)
+        blog("Echo -> disabled")
     if cfg.transcriber is not None:
-        mode = "streaming" if not args.no_streaming_asr else "finalize-only"
-        print(
+        mode = "streaming" if args.streaming_asr else "finalize-only"
+        blog(
             f"ASR -> faster-whisper model={args.whisper_model} "
             f"device={args.whisper_device} compute={args.whisper_compute_type} "
             f"language={cfg.transcriber.language_label} "
             f"mode={mode} flush_ms={args.whisper_flush_ms}",
-            flush=True,
         )
     else:
-        print("ASR -> disabled", flush=True)
+        blog("ASR -> disabled")
     if cfg.hermes is not None:
-        print(
+        blog(
             f"Hermes -> {cfg.hermes.endpoint} model={cfg.hermes.model} "
             f"conversation={cfg.hermes_conversation_id} ({hermes_session_mode}) "
             f"session_file={hermes_session_file} "
             f"read_timeout={cfg.hermes.read_timeout_s:.0f}s retries={cfg.hermes._max_retries}",
-            flush=True,
         )
     else:
-        print("Hermes -> disabled", flush=True)
+        blog("Hermes -> disabled")
     if cfg.tts is not None:
-        print(
+        blog(
             f"TTS -> chatterbox model={args.tts_model} device={args.tts_device} "
-            f"out_rate={args.tts_sample_rate_hz}Hz voice={cfg.tts.voice_label}",
-            flush=True,
+            f"attn={args.tts_attn} out_rate={args.tts_sample_rate_hz}Hz voice={cfg.tts.voice_label} "
+            f"idle_flush={cfg.tts_idle_flush_ms}ms lead={args.tts_play_lead_ms}ms "
+            f"play_chunk={cfg.play_chunk_bytes}B",
         )
     else:
-        print("TTS -> disabled", flush=True)
+        blog("TTS -> disabled")
     if firmware_bundle is not None:
         active_ver = firmware_catalog.active_version()
         count = len(firmware_catalog.list_entries())
-        print(
+        blog(
             f"OTA host -> {cfg.prefix}/firmware/manifest.json "
             f"active={active_ver} ({count} firmware(s) in catalog) "
             f"bin={firmware_bundle.bin_path}",
-            flush=True,
         )
     else:
-        print("OTA host -> no firmware binary (run tools/publish_firmware.sh after build)", flush=True)
-    print("", flush=True)
-    print("On the BOX serial CLI (use your PC/LAN IP):", flush=True)
-    print(f"  callback_base_set http://YOUR_LAN_IP:{args.port}{cfg.prefix}", flush=True)
-    print("  config_save", flush=True)
-    print("", flush=True)
+        blog("OTA host -> no firmware binary (run tools/publish_firmware.sh after build)")
+    blog("")
+    blog("On the BOX serial CLI (use your PC/LAN IP):")
+    blog(f"  callback_base_set http://YOUR_LAN_IP:{args.port}{cfg.prefix}")
+    blog("  config_save")
+    blog("")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.", flush=True)
+        blog("\nStopped.")
     finally:
         if cfg.transcriber is not None:
             cfg.transcriber.stop()

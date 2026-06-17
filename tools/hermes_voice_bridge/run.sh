@@ -33,6 +33,31 @@ if [[ -n "${ESP_AUTH_TOKEN:-}" ]]; then
 elif [[ -n "${ECHO_AUTH_TOKEN:-}" ]]; then
   BRIDGE_ARGS+=(--echo-auth-token "$ECHO_AUTH_TOKEN")
 fi
+if [[ "${BRIDGE_STREAMING_ASR:-0}" == "1" ]]; then
+  BRIDGE_ARGS+=(--streaming-asr)
+fi
+if [[ -n "${BRIDGE_TTS_ATTN:-}" ]]; then
+  BRIDGE_ARGS+=(--tts-attn "$BRIDGE_TTS_ATTN")
+fi
+if [[ -n "${TTS_VOICE_WAV:-}" ]]; then
+  BRIDGE_ARGS+=(--tts-voice-wav "$TTS_VOICE_WAV")
+fi
+if [[ -n "${TTS_IDLE_FLUSH_MS:-}" ]]; then
+  BRIDGE_ARGS+=(--tts-idle-flush-ms "$TTS_IDLE_FLUSH_MS")
+fi
+if [[ -n "${TTS_PLAY_LEAD_MS:-}" ]]; then
+  BRIDGE_ARGS+=(--tts-play-lead-ms "$TTS_PLAY_LEAD_MS")
+fi
+if [[ -n "${PLAY_CHUNK_BYTES:-}" ]]; then
+  BRIDGE_ARGS+=(--play-chunk-bytes "$PLAY_CHUNK_BYTES")
+fi
+if [[ -n "${BRIDGE_DEBUG:-}" ]]; then
+  if [[ "${BRIDGE_DEBUG}" == "1" ]]; then
+    BRIDGE_ARGS+=(--debug)
+  else
+    BRIDGE_ARGS+=(--debug "$BRIDGE_DEBUG")
+  fi
+fi
 
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PYTHON="$ROOT/.venv/bin/python"

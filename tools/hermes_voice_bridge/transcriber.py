@@ -12,6 +12,8 @@ from typing import Callable, Literal
 
 import numpy as np
 
+from bridge_log import blog
+
 try:
     from faster_whisper import WhisperModel
 except ImportError:
@@ -187,11 +189,10 @@ class WhisperTranscriber:
     def _ensure_model(self) -> WhisperModel:
         with self._model_lock:
             if self._model is None:
-                print(
+                blog(
                     f"[asr] loading faster-whisper model={self._model_size} "
                     f"device={self._device} compute={self._compute_type} "
                     f"language={self.language_label}",
-                    flush=True,
                 )
                 t0 = time.time()
                 self._model = WhisperModel(
@@ -199,7 +200,7 @@ class WhisperTranscriber:
                     device=self._device,
                     compute_type=self._compute_type,
                 )
-                print(f"[asr] model ready in {time.time() - t0:.1f}s", flush=True)
+                blog(f"[asr] model ready in {time.time() - t0:.1f}s")
             return self._model
 
     def _snapshot_state(self, utterance_id: str) -> tuple[bytes, _UtteranceAsrState] | None:
@@ -241,9 +242,8 @@ class WhisperTranscriber:
         segments, info = model.transcribe(audio, **kwargs)
         segment_list = list(segments)
         if peak < 0.12 and audio.size:
-            print(
+            blog(
                 f"[asr] note: input peak={peak:.3f} after normalize — check mic gain / dropped upload chunks",
-                flush=True,
             )
         return segment_list, info, time.time() - t0
 
@@ -274,7 +274,7 @@ class WhisperTranscriber:
             state.emitted_text = (state.emitted_text + " " + chunk).strip()
             tag = "asr+" if partial else "asr"
             lang = self._language or getattr(info, "language", None) or "unknown"
-            print(f"[{tag}] {utterance_id} ({lang}, {decode_s:.1f}s): {chunk}", flush=True)
+            blog(f"[{tag}] {utterance_id} ({lang}, {decode_s:.1f}s): {chunk}")
 
     def _finish_job(self, utterance_id: str) -> None:
         follow_up: _AsrJob | None = None
@@ -292,9 +292,9 @@ class WhisperTranscriber:
             elif state.finalized:
                 final_text = state.emitted_text
                 if final_text:
-                    print(f"[asr] {utterance_id}: {final_text}", flush=True)
+                    blog(f"[asr] {utterance_id}: {final_text}")
                 else:
-                    print(f"[asr] {utterance_id}: (no speech detected)", flush=True)
+                    blog(f"[asr] {utterance_id}: (no speech detected)")
                 if self._on_final is not None and final_text:
                     try:
                         self._on_final(utterance_id, final_text)
@@ -312,6 +312,19 @@ class WhisperTranscriber:
             return
 
         pcm, state = snapshot
+        if (
+            job.kind == "final"
+            and self._streaming
+            and state.emitted_text
+            and state.last_flush_pcm_bytes >= len(pcm)
+        ):
+            blog(
+                f"[asr] {job.utterance_id}: reuse streaming transcript "
+                f"(skip redundant final decode)",
+            )
+            self._finish_job(job.utterance_id)
+            return
+
         try:
             segments, info, decode_s = self._transcribe_pcm(pcm, state.sample_rate_hz)
             partial = job.kind == "partial" and not state.finalized
@@ -327,13 +340,12 @@ class WhisperTranscriber:
                 full_text = "".join(segment.text for segment in segments).strip()
                 if full_text and full_text != state.emitted_text:
                     lang = self._language or getattr(info, "language", None) or "unknown"
-                    print(
+                    blog(
                         f"[asr] {job.utterance_id} ({lang}, {decode_s:.1f}s): {full_text}",
-                        flush=True,
                     )
                     state.emitted_text = full_text
         except Exception:
-            print(f"[asr] {job.utterance_id}: transcription failed", flush=True)
+            blog(f"[asr] {job.utterance_id}: transcription failed")
             traceback.print_exc()
         finally:
             self._finish_job(job.utterance_id)
@@ -372,7 +384,7 @@ def build_transcriber_from_args(
         compute_type=args.whisper_compute_type,
         beam_size=args.whisper_beam_size,
         flush_ms=args.whisper_flush_ms,
-        streaming=not getattr(args, "no_streaming_asr", False),
+        streaming=getattr(args, "streaming_asr", False),
         language=resolve_whisper_language(getattr(args, "whisper_language", "en")),
         on_final=on_final,
     )

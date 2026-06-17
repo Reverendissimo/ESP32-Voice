@@ -43,15 +43,16 @@ def configure_ml_runtime(*, hf_token: str = "") -> None:
     logging.getLogger("transformers.integrations.sdpa_attention").setLevel(logging.ERROR)
 
 
-def configure_chatterbox_attention(model: object) -> None:
-    """Use eager attention so Chatterbox can request output_attentions without sdpa warnings."""
+def configure_chatterbox_attention(model: object, *, mode: str = "sdpa") -> None:
+    """Set transformer attention implementation (sdpa is faster on CUDA)."""
     t3 = getattr(model, "t3", None)
     tfmr = getattr(t3, "tfmr", None) if t3 is not None else None
     config = getattr(tfmr, "config", None) if tfmr is not None else None
     if config is None:
         return
-    if getattr(config, "_attn_implementation", None) in (None, "sdpa"):
-        config._attn_implementation = "eager"
+    impl = "eager" if mode.strip().lower() == "eager" else "sdpa"
+    if getattr(config, "_attn_implementation", None) in (None, "sdpa", "eager"):
+        config._attn_implementation = impl
 
 
 class _FilteredStderr(TextIOBase):
