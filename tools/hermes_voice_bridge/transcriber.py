@@ -67,6 +67,7 @@ class WhisperTranscriber:
         self._on_final = on_final
         self._model: WhisperModel | None = None
         self._model_lock = threading.Lock()
+        self._inference_lock = threading.Lock()
         self._states: dict[str, _UtteranceAsrState] = {}
         self._states_lock = threading.Lock()
         self._queue: queue.Queue[_AsrJob | None] = queue.Queue()
@@ -186,6 +187,62 @@ class WhisperTranscriber:
             )
         self._queue.put(_AsrJob(kind="final", utterance_id=utterance_id))
 
+    def transcribe_pcm_sync(
+        self,
+        pcm: bytes,
+        *,
+        sample_rate_hz: int,
+        language: str | None = None,
+    ) -> str:
+        """Synchronous transcribe for OpenAI /v1/audio/transcriptions (shares loaded model)."""
+        with self._inference_lock:
+            kwargs_lang = language.strip() if language else self._language
+            segments, info, decode_s = self._transcribe_pcm_with_language(
+                pcm,
+                sample_rate_hz,
+                language=kwargs_lang,
+            )
+        text = " ".join((segment.text or "").strip() for segment in segments).strip()
+        lang = kwargs_lang or getattr(info, "language", None) or "unknown"
+        blog(f"[openai-stt] {lang}, {decode_s:.1f}s: {text or '(no speech detected)'}")
+        return text
+
+    def _transcribe_pcm_with_language(
+        self,
+        pcm: bytes,
+        sample_rate_hz: int,
+        *,
+        language: str | None,
+    ) -> tuple[list, object, float]:
+        model = self._ensure_model()
+        audio = self._pcm_to_audio(pcm)
+        if sample_rate_hz != 16000 and audio.size:
+            try:
+                import librosa
+
+                audio = librosa.resample(
+                    audio,
+                    orig_sr=sample_rate_hz,
+                    target_sr=16000,
+                )
+            except ImportError:
+                pass
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        t0 = time.time()
+        kwargs: dict = {
+            "beam_size": self._beam_size,
+            "vad_filter": True,
+        }
+        if language:
+            kwargs["language"] = language
+        segments, info = model.transcribe(audio, **kwargs)
+        segment_list = list(segments)
+        if peak < 0.12 and audio.size:
+            blog(
+                f"[asr] note: input peak={peak:.3f} after normalize — check mic gain / dropped upload chunks",
+            )
+        return segment_list, info, time.time() - t0
+
     def _ensure_model(self) -> WhisperModel:
         with self._model_lock:
             if self._model is None:
@@ -229,23 +286,12 @@ class WhisperTranscriber:
         return np.clip(audio * gain, -1.0, 1.0)
 
     def _transcribe_pcm(self, pcm: bytes, sample_rate_hz: int) -> tuple[list, object, float]:
-        model = self._ensure_model()
-        audio = self._pcm_to_audio(pcm)
-        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        t0 = time.time()
-        kwargs: dict = {
-            "beam_size": self._beam_size,
-            "vad_filter": True,
-        }
-        if self._language is not None:
-            kwargs["language"] = self._language
-        segments, info = model.transcribe(audio, **kwargs)
-        segment_list = list(segments)
-        if peak < 0.12 and audio.size:
-            blog(
-                f"[asr] note: input peak={peak:.3f} after normalize — check mic gain / dropped upload chunks",
+        with self._inference_lock:
+            return self._transcribe_pcm_with_language(
+                pcm,
+                sample_rate_hz,
+                language=self._language,
             )
-        return segment_list, info, time.time() - t0
 
     def _emit_new_segments(
         self,

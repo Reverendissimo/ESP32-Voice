@@ -9,6 +9,8 @@ Endpoints (under --prefix, default /api/v1):
   POST /speech           - receive PCM chunks (legacy A2 JSON + pcm_b64)
   POST /speech/finalize  - finalize utterance, save WAV, run ASR
   POST /tts/speak        - synthesize text with Chatterbox and play on ESP
+  POST /v1/audio/transcriptions - OpenAI-compatible STT (shared Whisper model)
+  POST /v1/audio/speech  - OpenAI-compatible TTS (shared Chatterbox model)
   GET  /status           - recent utterances and saved recordings
 
 On finalize, runs a final faster-whisper pass and prints:
@@ -32,7 +34,9 @@ import argparse
 import base64
 import binascii
 import json
+import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -60,6 +64,12 @@ from firmware_hosting import FirmwareBundle, manifest_json
 from hermes_client import HermesClient, HermesError, build_hermes_from_args
 from hermes_session import DEFAULT_SESSION_FILE, resolve_active_session
 from ml_runtime import configure_ml_runtime
+from openai_audio_api import (
+    OPENAI_AUDIO_SPEECH,
+    OPENAI_AUDIO_TRANSCRIPTIONS,
+    handle_openai_audio_post,
+    is_openai_audio_path,
+)
 from transcriber import WhisperTranscriber, build_transcriber_from_args
 from tts_engine import ChatterboxTtsEngine, build_tts_from_args
 
@@ -295,6 +305,16 @@ def echo_playback(
         stream_end=stream_end,
         log_prefix="[echo]",
     )
+
+
+def guess_lan_ip() -> str:
+    """Primary outbound IPv4 on the LAN (for startup URLs shown to operators)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
 
 
 def _split_pending_sentences(pending: str) -> tuple[list[str], str]:
@@ -547,6 +567,9 @@ class ServerConfig:
     firmware_bin_path: str = ""
     firmware_version_override: str = ""
     public_base_url: str = ""
+    voice_tools_openai_key: str = ""
+    openai_stt_model: str = "whisper-base"
+    openai_tts_model: str = "chatterbox-turbo"
 
 
 _FW_VERSION_BIN_RE = re.compile(r"^/firmware/([^/]+)/esp32-voice\.bin$")
@@ -641,6 +664,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _full_path(self) -> str:
+        return urlparse(self.path).path.rstrip("/") or "/"
 
     def _route_path(self) -> str:
         prefix = self.cfg.prefix.rstrip("/")
@@ -847,6 +873,11 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:
+        full_path = self._full_path()
+        if is_openai_audio_path(full_path):
+            handle_openai_audio_post(self, self.cfg, full_path)
+            return
+
         path = self._route_path()
 
         if self._try_ui_post(path):
@@ -1276,6 +1307,21 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Default OTA secret for the web admin UI",
     )
+    parser.add_argument(
+        "--voice-tools-openai-key",
+        default="",
+        help="Bearer token for OpenAI-compatible /v1/audio/* (or VOICE_TOOLS_OPENAI_KEY)",
+    )
+    parser.add_argument(
+        "--openai-stt-model",
+        default="",
+        help="Advertised STT model name for /v1/audio/transcriptions (default: whisper-<whisper-model>)",
+    )
+    parser.add_argument(
+        "--openai-tts-model",
+        default="chatterbox-turbo",
+        help="Advertised TTS model name for /v1/audio/speech (default: chatterbox-turbo)",
+    )
     return parser.parse_args()
 
 
@@ -1305,6 +1351,11 @@ def main() -> int:
     cfg.firmware_bin_path = args.firmware_bin.strip()
     cfg.firmware_version_override = args.firmware_version.strip()
     cfg.public_base_url = args.public_base_url.strip()
+    cfg.voice_tools_openai_key = (
+        args.voice_tools_openai_key.strip() or os.environ.get("VOICE_TOOLS_OPENAI_KEY", "").strip()
+    )
+    cfg.openai_stt_model = args.openai_stt_model.strip() or f"whisper-{args.whisper_model}"
+    cfg.openai_tts_model = args.openai_tts_model.strip() or "chatterbox-turbo"
 
     firmware_catalog = FirmwareCatalog(here / "uploads" / "firmware")
     firmware_catalog.import_dist_default()
@@ -1483,6 +1534,21 @@ def main() -> int:
         )
     else:
         blog("TTS -> disabled")
+    if cfg.voice_tools_openai_key:
+        lan_ip = guess_lan_ip()
+        base = f"http://{lan_ip}:{args.port}"
+        blog("OpenAI audio tools (shared bridge models):")
+        blog(
+            f"  STT  POST {base}{OPENAI_AUDIO_TRANSCRIPTIONS} "
+            f"model={cfg.openai_stt_model} uploads=opus/ogg/webm/wav key={cfg.voice_tools_openai_key}",
+        )
+        blog(
+            f"  TTS  POST {base}{OPENAI_AUDIO_SPEECH} "
+            f"model={cfg.openai_tts_model} response_format=opus (default) key={cfg.voice_tools_openai_key}",
+        )
+        blog(f"  OpenAI client base_url -> {base}/v1")
+    else:
+        blog("OpenAI audio tools -> disabled (set VOICE_TOOLS_OPENAI_KEY)")
     if firmware_bundle is not None:
         active_ver = firmware_catalog.active_version()
         count = len(firmware_catalog.list_entries())

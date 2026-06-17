@@ -57,6 +57,15 @@ fi
 if [[ -n "${PLAY_CHUNK_BYTES:-}" ]]; then
   BRIDGE_ARGS+=(--play-chunk-bytes "$PLAY_CHUNK_BYTES")
 fi
+if [[ -n "${VOICE_TOOLS_OPENAI_KEY:-}" ]]; then
+  BRIDGE_ARGS+=(--voice-tools-openai-key "$VOICE_TOOLS_OPENAI_KEY")
+fi
+if [[ -n "${OPENAI_STT_MODEL:-}" ]]; then
+  BRIDGE_ARGS+=(--openai-stt-model "$OPENAI_STT_MODEL")
+fi
+if [[ -n "${OPENAI_TTS_MODEL:-}" ]]; then
+  BRIDGE_ARGS+=(--openai-tts-model "$OPENAI_TTS_MODEL")
+fi
 if [[ -n "${BRIDGE_DEBUG:-}" ]]; then
   if [[ "${BRIDGE_DEBUG}" == "1" ]]; then
     BRIDGE_ARGS+=(--debug)

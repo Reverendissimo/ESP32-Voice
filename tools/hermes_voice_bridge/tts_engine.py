@@ -152,6 +152,7 @@ class ChatterboxTtsEngine:
         self._voice_wav_path = self._validate_voice_wav(voice_wav_path)
         self._model = None
         self._model_lock = threading.Lock()
+        self._inference_lock = threading.Lock()
         self._conds_lock = threading.Lock()
         self._active_prompt_path: str | None = None
         self._coalesce: dict[str, _CoalesceBatch] = {}
@@ -445,12 +446,13 @@ class ChatterboxTtsEngine:
         prepare_s = self._ensure_voice_conditionals(model, prompt)
         t0 = time.monotonic()
 
-        if self._model_name == "multilingual":
-            wav = model.generate(text, language_id="en")
-        elif prompt:
-            wav = model.generate(text)
-        else:
-            wav = model.generate(text)
+        with self._inference_lock:
+            if self._model_name == "multilingual":
+                wav = model.generate(text, language_id="en")
+            elif prompt:
+                wav = model.generate(text)
+            else:
+                wav = model.generate(text)
 
         generate_s = time.monotonic() - t0
         src_sr = int(getattr(model, "sr", self._target_sample_rate_hz))
