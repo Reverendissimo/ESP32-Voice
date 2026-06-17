@@ -55,3 +55,4 @@ tools/hermes_voice_bridge/.env
 
 # Stray audio assets (voice refs live under tools/hermes_voice_bridge/voices/)
 *.ogg
+tools/hermes_voice_bridge/voices/karla.wav

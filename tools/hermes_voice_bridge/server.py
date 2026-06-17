@@ -981,7 +981,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tts-voice-wav",
         default="",
-        help="Override Chatterbox voice clone WAV (default: voices/karla.wav)",
+        help="Override Chatterbox voice clone WAV (default: voices/default_female.wav)",
     )
     parser.add_argument(
         "--tts-builtin-voice",

@@ -31,8 +31,7 @@ except ImportError:
 
 ChatterboxModel = Literal["english", "turbo", "multilingual"]
 PlaybackFn = Callable[..., bool]
-DEFAULT_VOICE_WAV = Path(__file__).resolve().parent / "voices" / "karla.wav"
-FALLBACK_VOICE_WAV = Path(__file__).resolve().parent / "voices" / "default_female.wav"
+DEFAULT_VOICE_WAV = Path(__file__).resolve().parent / "voices" / "default_female.wav"
 
 # Chatterbox Turbo only — other models speak these as literal words.
 PARALINGUISTIC_TAGS = (
@@ -123,9 +122,7 @@ class ChatterboxTtsEngine:
         if not self._voice_wav_path:
             return "builtin"
         if Path(self._voice_wav_path).resolve() == DEFAULT_VOICE_WAV.resolve():
-            return "karla (default)"
-        if Path(self._voice_wav_path).resolve() == FALLBACK_VOICE_WAV.resolve():
-            return "female (fallback)"
+            return "default_female"
         return f"clone ({self._voice_wav_path})"
 
     def start(self) -> None:
@@ -421,8 +418,6 @@ def resolve_voice_wav_path(explicit: str | None) -> str | None:
         return explicit
     if DEFAULT_VOICE_WAV.is_file():
         return str(DEFAULT_VOICE_WAV)
-    if FALLBACK_VOICE_WAV.is_file():
-        return str(FALLBACK_VOICE_WAV)
     return None
 
 
