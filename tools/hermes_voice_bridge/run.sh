@@ -48,6 +48,12 @@ fi
 if [[ -n "${TTS_PLAY_LEAD_MS:-}" ]]; then
   BRIDGE_ARGS+=(--tts-play-lead-ms "$TTS_PLAY_LEAD_MS")
 fi
+if [[ -n "${TTS_COALESCE_MS:-}" ]]; then
+  BRIDGE_ARGS+=(--tts-coalesce-ms "$TTS_COALESCE_MS")
+fi
+if [[ -n "${TTS_IDLE_FLUSH_MIN_CHARS:-}" ]]; then
+  BRIDGE_ARGS+=(--tts-idle-flush-min-chars "$TTS_IDLE_FLUSH_MIN_CHARS")
+fi
 if [[ -n "${PLAY_CHUNK_BYTES:-}" ]]; then
   BRIDGE_ARGS+=(--play-chunk-bytes "$PLAY_CHUNK_BYTES")
 fi

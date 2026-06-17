@@ -313,6 +313,7 @@ def _split_pending_sentences(pending: str) -> tuple[list[str], str]:
 
 _MIN_TTS_CLAUSE_CHARS = 24
 _MIN_TTS_FIRST_CLAUSE_CHARS = 12
+_MIN_TTS_IDLE_FLUSH_CHARS = 20
 _MAX_TTS_PENDING_CHARS = 100
 _FIRST_CHUNK_WORD_CHARS = 40
 
@@ -323,13 +324,14 @@ def _split_pending_speech_chunks(
     min_clause_chars: int = _MIN_TTS_CLAUSE_CHARS,
     first_clause_chars: int = _MIN_TTS_FIRST_CLAUSE_CHARS,
     max_pending_chars: int = _MAX_TTS_PENDING_CHARS,
+    idle_min_chars: int = _MIN_TTS_IDLE_FLUSH_CHARS,
     aggressive_first: bool = False,
     idle_flush: bool = False,
 ) -> tuple[list[str], str]:
     """Extract speakable units: sentences, comma clauses, word buffers, or idle tail."""
     if idle_flush:
         text = pending.strip()
-        if len(text) >= 3:
+        if len(text) >= idle_min_chars:
             return [text], ""
         return [], pending
 
@@ -420,7 +422,11 @@ def handle_voice_reply(
                 if not pending.strip():
                     return
                 if idle:
-                    chunks, rest = _split_pending_speech_chunks(pending, idle_flush=True)
+                    chunks, rest = _split_pending_speech_chunks(
+                        pending,
+                        idle_flush=True,
+                        idle_min_chars=cfg.tts_idle_flush_min_chars,
+                    )
                 else:
                     chunks, rest = _split_pending_speech_chunks(
                         pending,
@@ -527,9 +533,10 @@ class ServerConfig:
     echo_enabled: bool = False
     echo_device_ip: str = ""
     echo_auth_token: str = ""
-    play_chunk_bytes: int = 8192
+    play_chunk_bytes: int = 24576
     tts_idle_flush_ms: int = 500
     tts_idle_poll_ms: int = 50
+    tts_idle_flush_min_chars: int = _MIN_TTS_IDLE_FLUSH_CHARS
     tts_first_clause_chars: int = _MIN_TTS_FIRST_CLAUSE_CHARS
     tts_min_clause_chars: int = _MIN_TTS_CLAUSE_CHARS
     transcriber: WhisperTranscriber | None = None
@@ -1021,8 +1028,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--play-chunk-bytes",
         type=int,
-        default=8192,
-        help="PCM bytes per /play POST (default: 8192, ~256 ms @ 16 kHz)",
+        default=24576,
+        help="PCM bytes per /play POST (default: 24576, ~768 ms @ 16 kHz)",
     )
     parser.add_argument(
         "--tts-idle-flush-ms",
@@ -1047,6 +1054,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1000,
         help="Buffer synthesized PCM before first ESP send (default: 1000, 0=off)",
+    )
+    parser.add_argument(
+        "--tts-coalesce-ms",
+        type=int,
+        default=0,
+        help="Merge consecutive TTS chunks within N ms after first chunk (default: 0=off)",
+    )
+    parser.add_argument(
+        "--tts-idle-flush-min-chars",
+        type=int,
+        default=_MIN_TTS_IDLE_FLUSH_CHARS,
+        help="Min chars before idle-flush sends pending Hermes text (default: 20)",
     )
     parser.add_argument(
         "--no-hermes-stream",
@@ -1279,6 +1298,7 @@ def main() -> int:
     cfg.play_chunk_bytes = max(2, args.play_chunk_bytes - (args.play_chunk_bytes % 2))
     cfg.tts_idle_flush_ms = max(0, args.tts_idle_flush_ms)
     cfg.tts_idle_poll_ms = max(20, args.tts_idle_poll_ms)
+    cfg.tts_idle_flush_min_chars = max(3, args.tts_idle_flush_min_chars)
     cfg.tts_first_clause_chars = max(3, args.tts_first_clause_chars)
     cfg.tts_min_clause_chars = _MIN_TTS_CLAUSE_CHARS
     cfg.reply_ctx = {}
@@ -1459,7 +1479,7 @@ def main() -> int:
             f"TTS -> chatterbox model={args.tts_model} device={args.tts_device} "
             f"attn={args.tts_attn} out_rate={args.tts_sample_rate_hz}Hz voice={cfg.tts.voice_label} "
             f"idle_flush={cfg.tts_idle_flush_ms}ms lead={args.tts_play_lead_ms}ms "
-            f"play_chunk={cfg.play_chunk_bytes}B",
+            f"coalesce={args.tts_coalesce_ms}ms play_chunk={cfg.play_chunk_bytes}B",
         )
     else:
         blog("TTS -> disabled")

@@ -14,9 +14,9 @@ except ImportError:
 from bridge_log import blog
 
 RING_CAPACITY_BYTES = 192 * 1024
-# ~256 ms of PCM per chunk at 16 kHz mono — smaller posts reduce time-to-first-sample on ESP.
+# ~768 ms of PCM per chunk at 16 kHz mono — must exceed typical LAN HTTP RTT.
 SLOW_CHUNK_MS = 400
-DEFAULT_CHUNK_BYTES = 8192
+DEFAULT_CHUNK_BYTES = 24576
 HIGH_WATER_BYTES = 96 * 1024
 MIN_SEND_BYTES = 4096
 RING_WAIT_TIMEOUT_S = 5.0

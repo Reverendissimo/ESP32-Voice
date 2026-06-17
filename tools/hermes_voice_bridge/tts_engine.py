@@ -8,7 +8,7 @@ import threading
 import time
 import traceback
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -33,6 +33,7 @@ except ImportError:
 ChatterboxModel = Literal["english", "turbo", "multilingual"]
 PlaybackFn = Callable[..., bool]
 DEFAULT_VOICE_WAV = Path(__file__).resolve().parent / "voices" / "default_female.wav"
+DEFAULT_COALESCE_MS = 0
 
 # Chatterbox Turbo only — other models speak these as literal words.
 PARALINGUISTIC_TAGS = (
@@ -52,11 +53,32 @@ _PARALINGUISTIC_TAG_RE = re.compile(
     + r")\]",
     re.IGNORECASE,
 )
+# Broad emoji / symbol strip before TTS (Hermes should avoid these; Chatterbox mishandles them).
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0001F1E0-\U0001F1FF"
+    "\u200d"
+    "\u20e3"
+    "\u2705"
+    "\u274c"
+    "\u2764"
+    "]+",
+    flags=re.UNICODE,
+)
 
 
 def strip_paralinguistic_tags(text: str) -> str:
     """Remove Turbo-only tags so non-turbo models do not say 'laugh' aloud."""
     cleaned = _PARALINGUISTIC_TAG_RE.sub("", text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def strip_emoji(text: str) -> str:
+    """Remove emoji and common symbols that Chatterbox reads badly."""
+    cleaned = _EMOJI_RE.sub("", text)
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
@@ -80,6 +102,17 @@ class _SynthResult:
     channels: int
 
 
+@dataclass
+class _CoalesceBatch:
+    texts: list[str] = field(default_factory=list)
+    device_uid: str = ""
+    device_ip: str = ""
+    auth_token: str = ""
+    prompt_wav_path: str | None = None
+    stream_end: bool = False
+    timer: threading.Timer | None = None
+
+
 class ChatterboxTtsEngine:
     """Synthesize and play speech with pipelined synth + playback worker threads."""
 
@@ -92,8 +125,9 @@ class ChatterboxTtsEngine:
         playback_fn: PlaybackFn | None = None,
         voice_wav_path: str | None = None,
         min_prompt_seconds: float = 5.0,
-        play_chunk_bytes: int = 8192,
+        play_chunk_bytes: int = 24576,
         play_lead_ms: int = 1000,
+        coalesce_ms: int = DEFAULT_COALESCE_MS,
         attn_mode: str = "sdpa",
     ) -> None:
         if librosa is None or torch is None:
@@ -107,6 +141,7 @@ class ChatterboxTtsEngine:
         self._play_lead_ms = max(0, play_lead_ms)
         bytes_per_sec = max(1, target_sample_rate_hz * 2)
         self._play_lead_bytes = int(bytes_per_sec * self._play_lead_ms / 1000)
+        self._coalesce_ms = max(0, coalesce_ms)
         self._pcm_buffers: dict[str, bytearray] = {}
         self._pcm_buffer_lock = threading.Lock()
         self._lead_primed: set[str] = set()
@@ -117,6 +152,11 @@ class ChatterboxTtsEngine:
         self._voice_wav_path = self._validate_voice_wav(voice_wav_path)
         self._model = None
         self._model_lock = threading.Lock()
+        self._conds_lock = threading.Lock()
+        self._active_prompt_path: str | None = None
+        self._coalesce: dict[str, _CoalesceBatch] = {}
+        self._coalesce_lock = threading.Lock()
+        self._coalesce_first_sent: set[str] = set()
         self._job_queue: queue.Queue[_TtsJob | None] = queue.Queue()
         self._ready_queue: queue.Queue[_SynthResult | None] = queue.Queue()
         self._synth_worker = threading.Thread(
@@ -151,7 +191,12 @@ class ChatterboxTtsEngine:
         self._started = False
 
     def preload(self) -> None:
-        self._ensure_model()
+        model = self._ensure_model()
+        prompt = self._voice_wav_path
+        if prompt:
+            prepare_s = self._ensure_voice_conditionals(model, prompt)
+            if prepare_s > 0:
+                blog(f"[tts] voice conditionals ready in {prepare_s:.1f}s")
 
     def speak_async(
         self,
@@ -164,22 +209,75 @@ class ChatterboxTtsEngine:
         auth_token: str = "",
         stream_end: bool = True,
     ) -> None:
-        cleaned = text.strip()
+        cleaned = strip_emoji(text.strip())
         if not cleaned or not device_uid or not device_ip:
             return
         if not self._started:
             self.start()
-        self._job_queue.put(
-            _TtsJob(
-                utterance_id=utterance_id,
-                text=cleaned,
-                device_uid=device_uid,
-                device_ip=device_ip,
-                prompt_wav_path=prompt_wav_path,
-                auth_token=auth_token,
-                stream_end=stream_end,
-            )
+
+        job = _TtsJob(
+            utterance_id=utterance_id,
+            text=cleaned,
+            device_uid=device_uid,
+            device_ip=device_ip,
+            prompt_wav_path=prompt_wav_path,
+            auth_token=auth_token,
+            stream_end=stream_end,
         )
+
+        if self._coalesce_ms <= 0:
+            self._enqueue_job(job)
+            return
+
+        with self._coalesce_lock:
+            first_sent = utterance_id in self._coalesce_first_sent
+            if not first_sent:
+                self._coalesce_first_sent.add(utterance_id)
+                self._enqueue_job(job)
+                return
+
+            if stream_end:
+                batch = self._coalesce.get(utterance_id)
+                if batch is not None:
+                    batch.texts.append(cleaned)
+                    batch.stream_end = True
+                    self._flush_coalesce_locked(utterance_id)
+                else:
+                    job = _TtsJob(
+                        utterance_id=utterance_id,
+                        text=cleaned,
+                        device_uid=device_uid,
+                        device_ip=device_ip,
+                        prompt_wav_path=prompt_wav_path,
+                        auth_token=auth_token,
+                        stream_end=True,
+                    )
+                    self._enqueue_job(job)
+                return
+
+            batch = self._coalesce.get(utterance_id)
+            if batch is None:
+                batch = _CoalesceBatch(
+                    device_uid=device_uid,
+                    device_ip=device_ip,
+                    auth_token=auth_token,
+                    prompt_wav_path=prompt_wav_path,
+                )
+                self._coalesce[utterance_id] = batch
+            batch.texts.append(cleaned)
+            batch.device_uid = device_uid
+            batch.device_ip = device_ip
+            batch.auth_token = auth_token
+            if prompt_wav_path:
+                batch.prompt_wav_path = prompt_wav_path
+            if batch.timer is None:
+                batch.timer = threading.Timer(
+                    self._coalesce_ms / 1000.0,
+                    self._coalesce_timeout,
+                    args=(utterance_id,),
+                )
+                batch.timer.daemon = True
+                batch.timer.start()
 
     def speak_stream_end(
         self,
@@ -193,7 +291,12 @@ class ChatterboxTtsEngine:
             return
         if not self._started:
             self.start()
-        self._job_queue.put(
+
+        with self._coalesce_lock:
+            self._flush_coalesce_locked(utterance_id)
+            self._coalesce_first_sent.discard(utterance_id)
+
+        self._enqueue_job(
             _TtsJob(
                 utterance_id=utterance_id,
                 text="",
@@ -214,6 +317,33 @@ class ChatterboxTtsEngine:
     ) -> tuple[bytes, int, int]:
         wav, src_sr = self._synthesize_wav(text, prompt_wav_path=prompt_wav_path)
         return self._wav_to_pcm16(wav, src_sr)
+
+    def _enqueue_job(self, job: _TtsJob) -> None:
+        self._job_queue.put(job)
+
+    def _coalesce_timeout(self, utterance_id: str) -> None:
+        with self._coalesce_lock:
+            self._flush_coalesce_locked(utterance_id)
+
+    def _flush_coalesce_locked(self, utterance_id: str) -> None:
+        batch = self._coalesce.pop(utterance_id, None)
+        if batch is None or not batch.texts:
+            return
+        if batch.timer is not None:
+            batch.timer.cancel()
+            batch.timer = None
+        merged = " ".join(batch.texts)
+        self._enqueue_job(
+            _TtsJob(
+                utterance_id=utterance_id,
+                text=merged,
+                device_uid=batch.device_uid,
+                device_ip=batch.device_ip,
+                prompt_wav_path=batch.prompt_wav_path,
+                auth_token=batch.auth_token,
+                stream_end=batch.stream_end,
+            )
+        )
 
     def _validate_voice_wav(self, voice_wav_path: str | None) -> str | None:
         if not voice_wav_path:
@@ -261,6 +391,22 @@ class ChatterboxTtsEngine:
             blog(f"[tts] model ready in {time.time() - t0:.1f}s")
             return self._model
 
+    def _ensure_voice_conditionals(self, model: object, prompt_path: str | None) -> float:
+        """Load clone voice embeddings once; return seconds spent preparing."""
+        if not prompt_path:
+            return 0.0
+        resolved = str(Path(prompt_path).resolve())
+        with self._conds_lock:
+            if self._active_prompt_path == resolved:
+                return 0.0
+            prepare = getattr(model, "prepare_conditionals", None)
+            if prepare is None:
+                return 0.0
+            t0 = time.monotonic()
+            prepare(resolved)
+            self._active_prompt_path = resolved
+            return time.monotonic() - t0
+
     def _prompt_long_enough(self, prompt_wav_path: str | None) -> str | None:
         if not prompt_wav_path:
             return None
@@ -292,17 +438,26 @@ class ChatterboxTtsEngine:
             text = strip_paralinguistic_tags(text)
             if not text:
                 raise ValueError("empty text after removing paralinguistic tags")
-        t0 = time.time()
+        text = strip_emoji(text)
+        if not text:
+            raise ValueError("empty text after removing emoji")
+
+        prepare_s = self._ensure_voice_conditionals(model, prompt)
+        t0 = time.monotonic()
 
         if self._model_name == "multilingual":
             wav = model.generate(text, language_id="en")
         elif prompt:
-            wav = model.generate(text, audio_prompt_path=prompt)
+            wav = model.generate(text)
         else:
             wav = model.generate(text)
 
+        generate_s = time.monotonic() - t0
         src_sr = int(getattr(model, "sr", self._target_sample_rate_hz))
-        blog(f"[tts] synthesized {len(text)} chars in {time.time() - t0:.1f}s")
+        blog(
+            f"[tts] synthesized {len(text)} chars in {prepare_s + generate_s:.1f}s "
+            f"(prepare={prepare_s * 1000:.0f}ms generate={generate_s * 1000:.0f}ms)",
+        )
         return wav, src_sr
 
     def _wav_to_pcm16(self, wav: object, src_sr: int) -> tuple[bytes, int, int]:
@@ -406,11 +561,9 @@ class ChatterboxTtsEngine:
         with self._pcm_buffer_lock:
             buf = self._pcm_buffers.get(utterance_id, bytearray())
             buf_len = len(buf)
-            already_streaming = utterance_id in self._lead_primed
             ready = (
                 force
                 or end
-                or already_streaming
                 or self._play_lead_bytes <= 0
                 or buf_len >= self._play_lead_bytes
             )
@@ -454,13 +607,17 @@ class ChatterboxTtsEngine:
         if stream is not None:
             stream.close()
         self._clear_utterance_buffer(utterance_id)
+        with self._coalesce_lock:
+            batch = self._coalesce.pop(utterance_id, None)
+            if batch is not None and batch.timer is not None:
+                batch.timer.cancel()
+            self._coalesce_first_sent.discard(utterance_id)
 
     def _play_result(self, result: _SynthResult) -> None:
         job = result.job
         pcm = result.pcm
         sample_rate_hz = result.sample_rate_hz
         channels = result.channels
-        duration_s = len(pcm) / (sample_rate_hz * channels * 2)
         if job.end_marker:
             blog(f"[tts] {job.utterance_id}: stream end")
             if self._playback_fn is not None:
@@ -471,6 +628,7 @@ class ChatterboxTtsEngine:
         if not pcm:
             return
 
+        duration_s = len(pcm) / (sample_rate_hz * channels * 2)
         blog(
             f"[tts] {job.utterance_id}: {duration_s:.2f}s -> "
             f"{job.device_uid} @ {job.device_ip}",
@@ -512,7 +670,8 @@ def build_tts_from_args(args, *, playback_fn: PlaybackFn | None) -> ChatterboxTt
         target_sample_rate_hz=getattr(args, "tts_sample_rate_hz", 16000),
         playback_fn=playback_fn,
         voice_wav_path=voice_wav,
-        play_chunk_bytes=getattr(args, "play_chunk_bytes", 8192),
+        play_chunk_bytes=getattr(args, "play_chunk_bytes", 24576),
         play_lead_ms=getattr(args, "tts_play_lead_ms", 1000),
+        coalesce_ms=getattr(args, "tts_coalesce_ms", DEFAULT_COALESCE_MS),
         attn_mode=getattr(args, "tts_attn", "sdpa"),
     )
